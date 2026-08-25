@@ -2,7 +2,6 @@
   "name": "@dsh-external/dsh-subagent-router",
   "version": "0.0.1",
   "description": "Subagent routing console: sidebar panel to pick subagent model & reasoning effort with presets, per-channel rules, live child monitor, and a conversational subagent_route tool",
-  "private": true,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -10,6 +9,23 @@
     "lib"
   ],
   "license": "BSD-3-Clause",
+  "author": "heyuhang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyuhang908/dsh-subagent-router.git"
+  },
+  "homepage": "https://github.com/heyuhang908/dsh-subagent-router#readme",
+  "bugs": {
+    "url": "https://github.com/heyuhang908/dsh-subagent-router/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "subagent",
+    "model-routing",
+    "reasoning-effort",
+    "plugin"
+  ],
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
