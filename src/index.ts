@@ -89,19 +89,12 @@ const DEFAULT_PRESETS: Policy['presets'] = {
   effort_max: { label: '🧠 拉满', override: { effort: 'max' } },
 }
 
-// Deployment baseline: every child request must have an explicit router-owned route.
-// The value is only used when an old/missing policy has no complete global target.
-const MANAGED_DEFAULT_ROUTE: Required<OverrideSpec> = {
-  provider: 'command',
-  model: 'meta/muse-spark-1.2-contributor',
-  effort: 'max',
-}
-
 function defaultPolicy(): Policy {
   return {
     version: 1,
     enabled: true,
-    defaultOverride: { ...MANAGED_DEFAULT_ROUTE },
+    // 全新部署的默认策略：跟随父级（不强制改写）。显式配置后由 policy.json 接管。
+    defaultOverride: {},
     sessionOverrides: {},
     rules: [],
     presets: DEFAULT_PRESETS,
@@ -125,12 +118,13 @@ function sanitizePolicy(raw: unknown): Policy {
   if (!raw || typeof raw !== 'object') return base
   const r = raw as Record<string, unknown>
   const loadedDefault = sanitizeOverride(r.defaultOverride)
+  // 不完整 pair（只有 provider 或只有 model）视为无效配置：丢弃路由部分，仅保留 effort。
   const defaultOverride = loadedDefault.provider && loadedDefault.model
     ? loadedDefault
-    : { ...MANAGED_DEFAULT_ROUTE }
+    : { effort: loadedDefault.effort }
   const policy: Policy = {
     version: 1,
-    // The router is the only model authority; never fall back to parent options.
+    // The router owns routing; an empty defaultOverride means "follow the parent".
     enabled: true,
     defaultOverride,
     sessionOverrides: {},
@@ -355,7 +349,8 @@ export function apply(ctx: AppContext, config: Config): void {
     applyLayer(exact?.override)
     if (topAncestor) applyLayer(policy.sessionOverrides[topAncestor])
 
-    return isEmptyOverride(merged) ? { ...MANAGED_DEFAULT_ROUTE } : merged
+    // 空覆盖 = 跟随父级：交回空对象，由 agent/request 钩子的守卫原样放行。
+    return merged
   }
 
   /**
@@ -422,8 +417,8 @@ export function apply(ctx: AppContext, config: Config): void {
   }, { prepend: true, global: true }))
 
   // ── 核心钩子：agent/request 瀑布替换调用配置 ──
-  // This is global and fail-closed: every delegated request is owned by the router,
-  // including children whose start event was missed by a stale fiber.
+  // Global: every delegated request passes through the router; empty override =
+  // follow the parent (pass-through), and router faults also pass through (fail-open).
   disposeEvents.push((ctx.on as any)('agent/request', async (payload: any, next: () => Promise<any>) => {
     const config = await next()
     const agent = payload?.agent
@@ -441,6 +436,23 @@ export function apply(ctx: AppContext, config: Config): void {
     const topAncestor = sid ? topAncestorOf(sid, liveSession) : undefined
     if (child && topAncestor) child.rootSessionId = topAncestor
     const ov = effectiveOverride(channel, topAncestor)
+    // 跟随父级：无完整路由覆盖时原样放行（v0.0.2 起，无策略部署不再强制改写）。
+    if (!ov?.provider || !ov.model) {
+      if (ov?.effort) {
+        // 仅强度覆盖：保留父级 provider/model，只改思考强度。
+        try {
+          const allowed = await effortsFor(config.provider, config.model)
+          if (!allowed || allowed.includes(ov.effort)) {
+            rewrites += 1
+            return { ...config, reasoningEffort: ReasoningEffortId(ov.effort) }
+          }
+          ctx.logger?.warn?.('[' + SHORT + '] effort "' + ov.effort + '" 不被 ' + String(config.provider) + '/' + String(config.model) + ' 支持，已忽略')
+        } catch (e) {
+          ctx.logger?.warn?.('[' + SHORT + '] effort-only route failed; passing parent config: ' + String(e))
+        }
+      }
+      return config
+    }
     try {
       let patched = { ...config, provider: ov.provider, model: ov.model }
       let rewritten = ov.provider !== config.provider || ov.model !== config.model
@@ -469,10 +481,10 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       return patched
     } catch (e) {
-      // Never return the parent-selected model. Use the explicit managed baseline.
-      ctx.logger?.warn?.('[' + SHORT + '] agent/request hook failed; forcing managed baseline: ' + String(e))
-      const fallback = { ...MANAGED_DEFAULT_ROUTE }
-      return { ...config, provider: fallback.provider, model: fallback.model, reasoningEffort: fallback.effort }
+      // Fail-open: on router fault, pass the parent-selected route through instead of
+      // forcing a baseline that may not exist in this deployment (v0.0.2+).
+      ctx.logger?.warn?.('[' + SHORT + '] agent/request hook failed; passing parent route through: ' + String(e))
+      return config
     }
   }, { prepend: true, global: true }))
 
