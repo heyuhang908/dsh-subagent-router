@@ -200,7 +200,7 @@ function ensureCss(): void {
 
 async function getState(): Promise<State | null> {
   try {
-    const res = await fetch('/subagent-router/state', { cache: 'no-store' })
+    const res = await fetch('/subagent-routing-console/state', { cache: 'no-store' })
     if (!res.ok) return null
     return (await res.json()) as State
   } catch {
@@ -215,7 +215,7 @@ interface PutPolicyResult {
 
 async function putPolicy(policy: unknown): Promise<PutPolicyResult> {
   try {
-    const res = await fetch('/subagent-router/policy', {
+    const res = await fetch('/subagent-routing-console/policy', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(policy),
