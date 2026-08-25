@@ -1,4 +1,4 @@
-﻿# @dsh-external/dsh-subagent-routing-console
+# @dsh-external/dsh-subagent-routing-console
 
 子代理路由台：为所有委派通道（subagent/fork/workflow worker/ralph 等一切经本进程
 LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。

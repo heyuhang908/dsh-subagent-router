@@ -1,4 +1,4 @@
-﻿import { useEffect } from 'react'
+import { useEffect } from 'react'
 
 /**
  * @dsh-external/dsh-subagent-routing-console — client 侧栏常驻面板。

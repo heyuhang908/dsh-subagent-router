@@ -1,4 +1,4 @@
-﻿import { fileURLToPath } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 
 const PLUGIN_ID = "@dsh-external/dsh-subagent-routing-console"

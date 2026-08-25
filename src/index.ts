@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @dsh-external/dsh-subagent-routing-console — host half.
  *
  * 子代理路由台：为所有委派通道（subagent 工具 / fork / workflow worker / ralph 等
