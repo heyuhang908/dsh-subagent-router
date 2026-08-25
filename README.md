@@ -9,7 +9,8 @@ LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
   的子代理生效；会话内可经面板/`subagent_route` 单独修改
 - 侧栏常驻面板：预设 chips（跟随父级/🪫低强度/⚖️高强度/🧠拉满）+ 全局默认编辑器
    + 会话覆盖选择器（可手输会话 ID）+ 按通道规则 + 最近子代理监视
-- 当前会话路由控件以固定悬浮窗呈现，支持拖动、收起和位置记忆；其余路由设置仍保留在侧栏面板中。
+- 会话覆盖（含当前会话）统一在侧栏面板「本会话」Tab 管理；旧版输入栏固定悬浮窗已移除，
+  客户端仅保留一个空渲染 tracker（conversation.input.dock slot）向面板广播当前会话 ID。
 - host 数据面：`/subagent-router/state`（GET）/ `/subagent-router/policy`（PUT）
 - 对话内工具：`subagent_route`（show / set / preset / disable / inherit，scope=session 默认）
 - 生效机制：`dsh-agent` 的 `agent/request` 瀑布替换（子代理 step 构建时改

@@ -1,4 +1,4 @@
-import { createElement, useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
 
 /**
  * @dsh-external/dsh-subagent-router — client 侧栏常驻面板。
@@ -32,10 +32,10 @@ export function apply(ctx: ClientContext): void {
     (ctx as any).slots.register({ name: 'sidebar.footer.action', id: 'dsh-subagent-router-anchor' }, () => null),
   )
   // Session-scope slot supplies the actual top-level conversation id. The
-  // rendered controls are promoted to a fixed, draggable floater for the
-  // conversation in view.
+  // floater UI was removed; a null-rendering tracker keeps broadcasting the
+  // session id to the sidebar panel (CURRENT_SESSION_EVENT).
   ;(ctx as any).slots.inject('conversation.input.dock', () =>
-    (ctx as any).slots.register({ name: 'conversation.input.dock', id: 'dsh-subagent-router-session-route', order: 15 }, InlineSessionRoute),
+    (ctx as any).slots.register({ name: 'conversation.input.dock', id: 'dsh-subagent-router-session-tracker', order: 15 }, SessionIdTracker),
   )
   // 面板控制器生命周期交给 ctx.effect（卸载时清 timers/observers）。
   ctx.effect(() => {
@@ -86,80 +86,12 @@ interface State {
 const CURRENT_SESSION_EVENT = 'dsh-subagent-router:current-session'
 let activeSessionId = ''
 
-type FloaterPosition = { left: number; top: number }
-type FloaterDrag = FloaterPosition & {
-  pointerId: number
-  startX: number
-  startY: number
-  width: number
-  height: number
-  latest: FloaterPosition
-}
+type SessionSlotProps = { sessionId?: unknown }
 
-const FLOATER_POSITION_KEY = 'dsh-subagent-router:session-route-position:v1'
-
-function readFloaterPosition(): FloaterPosition | null {
-  try {
-    const raw = JSON.parse(window.localStorage.getItem(FLOATER_POSITION_KEY) ?? 'null') as Partial<FloaterPosition> | null
-    if (raw === null || !Number.isFinite(raw.left) || !Number.isFinite(raw.top)) return null
-    return { left: Number(raw.left), top: Number(raw.top) }
-  } catch {
-    return null
-  }
-}
-
-function writeFloaterPosition(position: FloaterPosition): void {
-  try {
-    window.localStorage.setItem(FLOATER_POSITION_KEY, JSON.stringify(position))
-  } catch {
-    // A private browsing context may deny localStorage; the floater still works for this render.
-  }
-}
-
-function clampFloaterPosition(position: FloaterPosition, width: number, height: number): FloaterPosition {
-  const margin = 12
-  const maxLeft = Math.max(margin, window.innerWidth - width - margin)
-  const maxTop = Math.max(margin, window.innerHeight - height - margin)
-  return {
-    left: Math.min(maxLeft, Math.max(margin, position.left)),
-    top: Math.min(maxTop, Math.max(margin, position.top)),
-  }
-}
-
-type SessionRouteSlotProps = { sessionId?: unknown }
-
-function InlineSessionRoute({ sessionId: rawSessionId }: SessionRouteSlotProps): any {
+// 悬浮窗（本会话路由浮层）已移除。保留一个空渲染 tracker：会话视图挂载时向
+// 侧栏面板广播当前顶层会话 ID（面板「本会话」Tab 依赖 CURRENT_SESSION_EVENT）。
+function SessionIdTracker({ sessionId: rawSessionId }: SessionSlotProps): any {
   const sessionId = typeof rawSessionId === 'string' ? rawSessionId : String(rawSessionId ?? '')
-  const [routeState, setRouteState] = useState<State | null>(null)
-  const [draft, setDraft] = useState<OverrideSpec>({})
-  const [saved, setSaved] = useState<OverrideSpec>({})
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
-  const [collapsed, setCollapsed] = useState(false)
-  const [dragging, setDragging] = useState(false)
-  const [floaterPosition, setFloaterPosition] = useState<FloaterPosition | null>(null)
-  const floaterRef = useRef<HTMLDivElement | null>(null)
-  const dragRef = useRef<FloaterDrag | null>(null)
-  const dirty = !isEqualOv(draft, saved)
-  const invalidPair = Boolean((draft.provider && !draft.model) || (!draft.provider && draft.model))
-
-  useEffect(() => {
-    const stored = readFloaterPosition()
-    if (stored !== null) {
-      const node = floaterRef.current
-      setFloaterPosition(clampFloaterPosition(stored, node?.offsetWidth ?? 540, node?.offsetHeight ?? 220))
-    }
-    const onResize = (): void => {
-      setFloaterPosition((previous) => {
-        if (previous === null) return previous
-        const node = floaterRef.current
-        return clampFloaterPosition(previous, node?.offsetWidth ?? 540, node?.offsetHeight ?? 220)
-      })
-    }
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-
   useEffect(() => {
     if (!sessionId) return
     activeSessionId = sessionId
@@ -170,239 +102,7 @@ function InlineSessionRoute({ sessionId: rawSessionId }: SessionRouteSlotProps):
       window.dispatchEvent(new CustomEvent(CURRENT_SESSION_EVENT, { detail: { sessionId: '' } }))
     }
   }, [sessionId])
-
-  useEffect(() => {
-    if (!sessionId || dirty) return
-    let live = true
-    const refresh = async (): Promise<void> => {
-      const next = await getState()
-      if (!live) return
-      if (!next) {
-        setRouteState(null)
-        setMessage('无法连接路由台')
-        return
-      }
-      const nextOverride = { ...(next.policy.sessionOverrides[sessionId] ?? {}) }
-      setRouteState(next)
-      setSaved(nextOverride)
-      setDraft(nextOverride)
-      setMessage('')
-    }
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 3000)
-    return () => {
-      live = false
-      window.clearInterval(timer)
-    }
-  }, [sessionId, dirty])
-
-  if (!sessionId) return null
-
-  const catalog = routeState?.catalog ?? []
-  const providers = catalog.filter((provider) => provider.models.length > 0)
-  const models = catalog.find((provider) => provider.name === draft.provider)?.models ?? []
-  const selectedModel = models.find((model) => model.id === draft.model)
-  const efforts = selectedModel?.efforts.length ? [...selectedModel.efforts] : COMMON_EFFORTS
-  const updateField = (field: 'provider' | 'model' | 'effort', value: string): void => {
-    setDraft((previous) => {
-      const next = { ...previous }
-      if (field === 'provider') {
-        if (value) next.provider = value
-        else delete next.provider
-        delete next.model
-      } else if (field === 'model') {
-        if (value) next.model = value
-        else delete next.model
-      } else if (value) {
-        next.effort = value
-      } else {
-        delete next.effort
-      }
-      return next
-    })
-    // The header status already communicates the draft state; keep the toolbar compact.
-    setMessage('')
-  }
-  const save = async (): Promise<void> => {
-    if (!dirty || invalidPair || saving) return
-    setSaving(true)
-    setMessage('保存中…')
-    try {
-      const response = await fetch('/subagent-router/session', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, override: isEmptyOv(draft) ? null : draft }),
-      })
-      const body = (await response.json()) as State & { error?: unknown }
-      if (!response.ok || body.ok === false) throw new Error(typeof body.error === 'string' ? body.error : '运行策略未改变')
-      const nextOverride = { ...(body.policy.sessionOverrides[sessionId] ?? {}) }
-      setRouteState(body)
-      setSaved(nextOverride)
-      setDraft(nextOverride)
-      setMessage('已保存，后续子代理立即使用新路由')
-      window.dispatchEvent(new CustomEvent('dsh-subagent-router:policy-saved', { detail: { sessionId } }))
-    } catch (error) {
-      setMessage('保存失败：' + String(error))
-    } finally {
-      setSaving(false)
-    }
-  }
-  const inherit = (): void => {
-    if (saving) return
-    setDraft({})
-    setMessage('')
-  }
-  const beginDrag = (event: any): void => {
-    if (event.button !== undefined && event.button !== 0) return
-    const node = floaterRef.current
-    if (!node) return
-    const rect = node.getBoundingClientRect()
-    const start = floaterPosition ?? { left: rect.left, top: rect.top }
-    const latest = clampFloaterPosition(start, rect.width, rect.height)
-    dragRef.current = {
-      ...start,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      width: rect.width,
-      height: rect.height,
-      latest,
-    }
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    setFloaterPosition(latest)
-    setDragging(true)
-  }
-  const moveDrag = (event: any): void => {
-    const active = dragRef.current
-    if (!active || active.pointerId !== event.pointerId) return
-    const next = clampFloaterPosition({
-      left: active.left + event.clientX - active.startX,
-      top: active.top + event.clientY - active.startY,
-    }, active.width, active.height)
-    active.latest = next
-    setFloaterPosition(next)
-  }
-  const endDrag = (event: any): void => {
-    const active = dragRef.current
-    if (!active || active.pointerId !== event.pointerId) return
-    event.currentTarget.releasePointerCapture?.(event.pointerId)
-    dragRef.current = null
-    setDragging(false)
-    setFloaterPosition(active.latest)
-    writeFloaterPosition(active.latest)
-  }
-  const select = (ariaLabel: string, value: string, options: Array<{ value: string; label: string }>, onChange: (value: string) => void, disabled = false): any =>
-    createElement('select', {
-      value,
-      disabled,
-      'aria-label': ariaLabel,
-      onChange: (event: any) => onChange(String(event.currentTarget.value)),
-    }, options.map((option) => createElement('option', { key: option.value || '__empty__', value: option.value }, option.label)))
-  const providerOptions = [
-    { value: '', label: '继承全局' },
-    ...providers.map((provider) => ({ value: provider.name, label: provider.name })),
-  ]
-  const modelOptions = [
-    { value: '', label: draft.provider ? '继承全局模型' : '先选择 provider' },
-    ...models.map((model) => ({ value: model.id, label: model.name })),
-  ]
-  const effortOptions = [
-    { value: '', label: '默认' },
-    ...efforts.map((effort) => ({ value: effort, label: effort })),
-  ]
-  const messageClass = message.startsWith('保存失败') || message.startsWith('无法') ? 'sr-session-message error' : 'sr-session-message'
-  const statusText = !routeState ? '读取中' : saving ? '保存中' : dirty ? '未保存' : isEmptyOv(saved) ? '继承全局' : '已覆盖'
-  const statusClass = !routeState ? 'is-loading' : dirty ? 'is-dirty' : isEmptyOv(saved) ? 'is-inherited' : 'is-active'
-  const routeText = draft.provider && draft.model ? `${draft.provider} / ${selectedModel?.name ?? draft.model}` : '继承全局路由'
-  const effortText = draft.effort || '默认强度'
-  const field = (label: string, control: any, className: string): any => createElement(
-    'label',
-    { className: 'sr-float-field ' + className },
-    createElement('span', { className: 'sr-float-field-label' }, label),
-    control,
-  )
-  const providerControl = select('本会话 provider', draft.provider ?? '', providerOptions, (value) => updateField('provider', value), !routeState || saving)
-  const modelControl = select('本会话模型', draft.model ?? '', modelOptions, (value) => updateField('model', value), !routeState || !draft.provider || saving)
-  const effortControl = select('本会话强度', draft.effort ?? '', effortOptions, (value) => updateField('effort', value), !routeState || saving)
-  const header = createElement(
-    'div',
-    { className: 'sr-float-head' },
-    createElement(
-      'div',
-      {
-        className: 'sr-float-drag-region',
-        onPointerDown: beginDrag,
-        onPointerMove: moveDrag,
-        onPointerUp: endDrag,
-        onPointerCancel: endDrag,
-        'aria-grabbed': String(dragging),
-        title: '拖动悬浮窗',
-      },
-      createElement('span', { className: 'sr-float-grip', 'aria-hidden': 'true' }, '⋮⋮'),
-      createElement(
-        'div',
-        { className: 'sr-float-heading' },
-        createElement('span', { className: 'sr-float-title' }, '本会话路由'),
-        createElement('span', { className: 'sr-float-current' }, '当前会话'),
-        createElement('span', { className: 'sr-float-id', title: sessionId }, sessionId.slice(0, 12)),
-      ),
-    ),
-    createElement(
-      'div',
-      { className: 'sr-float-tools' },
-      createElement('span', { className: 'sr-float-status ' + statusClass, 'aria-live': 'polite' }, statusText),
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'sr-float-toggle',
-          'aria-expanded': String(!collapsed),
-          'aria-label': collapsed ? '展开本会话路由' : '收起本会话路由',
-          title: collapsed ? '展开' : '收起',
-          onClick: () => setCollapsed((previous) => !previous),
-        },
-        collapsed ? '+' : '−',
-      ),
-    ),
-  )
-  const compact = createElement(
-    'div',
-    { className: 'sr-float-compact' },
-    createElement('span', { className: 'sr-float-route', title: routeText }, routeText),
-    createElement('span', { className: 'sr-float-effort' }, effortText),
-  )
-  const body = createElement(
-    'div',
-    { className: 'sr-float-body' },
-    createElement(
-      'div',
-      { className: 'sr-float-controls' },
-      field('Provider', providerControl, 'provider'),
-      field('模型', modelControl, 'model'),
-      field('强度', effortControl, 'effort'),
-      createElement(
-        'div',
-        { className: 'sr-float-actions' },
-        createElement('button', { type: 'button', className: 'primary', disabled: !dirty || invalidPair || saving || !routeState, onClick: () => void save() }, saving ? '保存中…' : '保存路由'),
-        createElement('button', { type: 'button', disabled: saving || isEmptyOv(draft), onClick: inherit }, '继承全局'),
-      ),
-    ),
-    message ? createElement('div', { className: messageClass, 'aria-live': 'polite' }, message) : null,
-  )
-  return createElement(
-    'div',
-    {
-      ref: floaterRef,
-      className: 'dsh-subagent-router-session-route' + (dirty ? ' is-dirty' : ''),
-      role: 'group',
-      'aria-label': '本会话路由',
-      'data-dragging': dragging ? 'true' : undefined,
-      'data-collapsed': collapsed ? 'true' : undefined,
-      style: floaterPosition === null ? undefined : { left: `${floaterPosition.left}px`, top: `${floaterPosition.top}px` },
-    },
-    header,
-    collapsed ? compact : body,
-  )
+  return null
 }
 
 const PANEL_ID = 'dsh-subagent-router-panel'
@@ -479,44 +179,6 @@ const CSS = `
 #${PANEL_ID} details.sr-details summary::before { content:"▸ "; font-size:9px; opacity:.6; }
 #${PANEL_ID} details.sr-details[open] summary::before { content:"▾ "; }
 #${PANEL_ID} .sr-hint { opacity:.62; font-size:10.5px; line-height:1.45; }
- .dsh-subagent-router-session-route { position:fixed; right:24px; bottom:116px; z-index:1200; display:flex; flex-direction:column; width:min(580px, calc(100vw - 32px)); box-sizing:border-box; overflow:hidden; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3)); border-radius:8px; background:var(--dsw-alias-bg-layer-1, rgba(255,255,255,.96)); color:var(--dsw-alias-label-primary, inherit); box-shadow:0 16px 42px rgba(24,32,48,.18), 0 3px 10px rgba(24,32,48,.12); font-size:12px; line-height:1.35; backdrop-filter:blur(18px); }
- .dsh-subagent-router-session-route[data-dragging='true'] { user-select:none; box-shadow:0 20px 48px rgba(24,32,48,.24), 0 4px 14px rgba(24,32,48,.16); }
- .dsh-subagent-router-session-route[data-collapsed='true'] { width:min(390px, calc(100vw - 32px)); }
- .dsh-subagent-router-session-route .sr-float-head { display:flex; align-items:center; min-height:48px; padding:8px 10px 8px 8px; gap:8px; border-bottom:1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.2)); background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,.055)); }
- .dsh-subagent-router-session-route .sr-float-drag-region { display:flex; align-items:center; flex:1 1 auto; min-width:0; gap:8px; cursor:grab; touch-action:none; }
- .dsh-subagent-router-session-route[data-dragging='true'] .sr-float-drag-region { cursor:grabbing; }
- .dsh-subagent-router-session-route .sr-float-grip { width:16px; color:var(--dsw-alias-label-secondary, #8a94a6); font-size:15px; letter-spacing:-3px; line-height:1; opacity:.75; }
- .dsh-subagent-router-session-route .sr-float-heading { display:flex; align-items:center; flex-wrap:wrap; min-width:0; gap:7px; }
- .dsh-subagent-router-session-route .sr-float-title { font-size:13px; font-weight:750; white-space:nowrap; }
- .dsh-subagent-router-session-route .sr-float-current { display:inline-flex; align-items:center; min-height:19px; padding:2px 7px; box-sizing:border-box; border:1px solid rgba(9,105,218,.25); border-radius:999px; background:rgba(9,105,218,.08); color:var(--dsw-alias-accent, #0969da); font-size:10px; font-weight:650; white-space:nowrap; }
- .dsh-subagent-router-session-route .sr-float-id { max-width:min(220px, 30vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 7px; border:1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.22)); border-radius:5px; color:var(--dsw-alias-label-secondary, inherit); opacity:.68; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:10px; }
- .dsh-subagent-router-session-route .sr-float-tools { display:flex; align-items:center; flex:0 0 auto; gap:7px; }
- .dsh-subagent-router-session-route .sr-float-status { display:inline-flex; align-items:center; min-height:20px; padding:2px 8px; box-sizing:border-box; border-radius:999px; font-size:10px; font-weight:650; white-space:nowrap; }
- .dsh-subagent-router-session-route .sr-float-status.is-loading { background:rgba(128,128,128,.1); color:var(--dsw-alias-label-secondary, inherit); opacity:.72; }
- .dsh-subagent-router-session-route .sr-float-status.is-inherited { background:rgba(128,128,128,.1); color:var(--dsw-alias-label-secondary, inherit); opacity:.78; }
- .dsh-subagent-router-session-route .sr-float-status.is-active { background:rgba(26,127,55,.11); color:#1a7f37; }
- .dsh-subagent-router-session-route .sr-float-status.is-dirty { background:rgba(154,103,0,.13); color:#9a6700; }
- .dsh-subagent-router-session-route .sr-float-toggle { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.35)); border-radius:6px; background:transparent; color:inherit; cursor:pointer; font:inherit; font-size:18px; line-height:1; }
- .dsh-subagent-router-session-route .sr-float-toggle:hover { background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,.12)); }
- .dsh-subagent-router-session-route .sr-float-compact { display:flex; align-items:center; min-width:0; gap:8px; padding:10px 12px 11px; }
- .dsh-subagent-router-session-route .sr-float-route { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:700; }
- .dsh-subagent-router-session-route .sr-float-effort { flex:0 0 auto; padding:3px 7px; border:1px solid rgba(130,80,223,.25); border-radius:999px; background:rgba(130,80,223,.08); color:#8250df; font-size:10px; font-weight:650; white-space:nowrap; }
- .dsh-subagent-router-session-route .sr-float-body { display:flex; flex-direction:column; gap:8px; padding:10px 12px 11px; }
- .dsh-subagent-router-session-route .sr-float-controls { display:grid; grid-template-columns:minmax(120px,.82fr) minmax(190px,1.35fr) minmax(100px,.64fr) auto; align-items:end; gap:8px; min-width:0; }
- .dsh-subagent-router-session-route .sr-float-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
- .dsh-subagent-router-session-route .sr-float-field-label { color:var(--dsw-alias-label-secondary, inherit); opacity:.72; font-size:10px; font-weight:650; line-height:1.2; }
- .dsh-subagent-router-session-route select { display:block; width:100%; min-width:0; max-width:none; height:32px; box-sizing:border-box; padding:5px 9px; font:inherit; font-size:11px; background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,.07)); color:inherit; border:1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.35)); border-radius:6px; }
- .dsh-subagent-router-session-route select:hover:not(:disabled) { border-color:var(--dsw-alias-border-default, rgba(128,128,128,.55)); }
- .dsh-subagent-router-session-route button { height:32px; box-sizing:border-box; cursor:pointer; border:1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.35)); background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,.08)); color:inherit; border-radius:6px; padding:0 11px; font:inherit; font-size:11px; line-height:30px; white-space:nowrap; }
- .dsh-subagent-router-session-route button.primary { border-color:var(--dsw-alias-accent, #0969da); background:var(--dsw-alias-accent, #0969da); color:#fff; font-weight:650; }
- .dsh-subagent-router-session-route button:hover:not(:disabled) { filter:brightness(.96); }
- .dsh-subagent-router-session-route button:disabled, .dsh-subagent-router-session-route select:disabled { opacity:.42; cursor:not-allowed; }
- .dsh-subagent-router-session-route button:focus-visible, .dsh-subagent-router-session-route select:focus-visible, .dsh-subagent-router-session-route .sr-float-drag-region:focus-visible { outline:2px solid var(--dsw-alias-accent, #0969da); outline-offset:2px; }
- .dsh-subagent-router-session-route .sr-float-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:6px; min-width:0; }
- .dsh-subagent-router-session-route .sr-session-message { padding-top:1px; color:var(--dsw-alias-label-secondary, inherit); opacity:.7; font-size:10px; line-height:1.35; }
- .dsh-subagent-router-session-route .sr-session-message.error { color:#cf222e; opacity:1; }
- @media (max-width: 760px) { .dsh-subagent-router-session-route { right:16px; bottom:92px; width:calc(100vw - 32px); } .dsh-subagent-router-session-route[data-collapsed='true'] { width:calc(100vw - 32px); } .dsh-subagent-router-session-route .sr-float-controls { grid-template-columns:repeat(3, minmax(0, 1fr)); } .dsh-subagent-router-session-route .sr-float-actions { grid-column:1 / -1; justify-content:flex-start; } }
- @media (max-width: 480px) { .dsh-subagent-router-session-route { right:10px; bottom:78px; width:calc(100vw - 20px); } .dsh-subagent-router-session-route .sr-float-head { padding-left:7px; } .dsh-subagent-router-session-route .sr-float-controls { grid-template-columns:1fr; } .dsh-subagent-router-session-route .sr-float-actions { grid-column:auto; justify-content:flex-start; } .dsh-subagent-router-session-route .sr-float-id { max-width:calc(100vw - 190px); } }
 @media (max-width: 420px) { #${PANEL_ID} select, #${PANEL_ID} input[type="text"] { max-width:100%; flex:1 1 120px; } #${PANEL_ID} .sr-row { gap:4px; } }
 #${PANEL_ID}.sr-collapsed .sr-tabs, #${PANEL_ID}.sr-collapsed .sr-panels { display:none !important; }
 `
