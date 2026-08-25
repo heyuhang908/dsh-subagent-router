@@ -1,7 +1,7 @@
-import { useEffect } from 'react'
+﻿import { useEffect } from 'react'
 
 /**
- * @dsh-external/dsh-subagent-router — client 侧栏常驻面板。
+ * @dsh-external/dsh-subagent-routing-console — client 侧栏常驻面板。
  *
  * 挂载方式：直接 DOM 挂载到侧栏列（绕过 slot 系统——conversation.view 是
  * session-scope 且空白会话时整个视图区不渲染，导致「会话开始前不可见」；
@@ -29,20 +29,20 @@ export function apply(ctx: ClientContext): void {
   // 扫描器锚点：注册一个空 sidebar.footer.action 条目（组件返回 null，无副作用），
   // 满足 dsh-super-injector 对 client 骨架的 REGISTER_NAME 校验。真实面板走下方 DOM 挂载。
   ;(ctx as any).slots.inject('sidebar.footer.action', () =>
-    (ctx as any).slots.register({ name: 'sidebar.footer.action', id: 'dsh-subagent-router-anchor' }, () => null),
+    (ctx as any).slots.register({ name: 'sidebar.footer.action', id: 'dsh-subagent-routing-console-anchor' }, () => null),
   )
   // Session-scope slot supplies the actual top-level conversation id. The
   // floater UI was removed; a null-rendering tracker keeps broadcasting the
   // session id to the sidebar panel (CURRENT_SESSION_EVENT).
   ;(ctx as any).slots.inject('conversation.input.dock', () =>
-    (ctx as any).slots.register({ name: 'conversation.input.dock', id: 'dsh-subagent-router-session-tracker', order: 15 }, SessionIdTracker),
+    (ctx as any).slots.register({ name: 'conversation.input.dock', id: 'dsh-subagent-routing-console-session-tracker', order: 15 }, SessionIdTracker),
   )
   // 面板控制器生命周期交给 ctx.effect（卸载时清 timers/observers）。
   ctx.effect(() => {
     const panel = createPanel(ctx)
     panel.start()
     return () => panel.dispose()
-  }, 'dsh-subagent-router: sidebar panel')
+  }, 'dsh-subagent-routing-console: sidebar panel')
 }
 
 // ──────────────────────────────── 数据模型 ────────────────────────────────
@@ -83,7 +83,7 @@ interface State {
   stats: { rewrites: number; trackedActive: number }
 }
 
-const CURRENT_SESSION_EVENT = 'dsh-subagent-router:current-session'
+const CURRENT_SESSION_EVENT = 'dsh-subagent-routing-console:current-session'
 let activeSessionId = ''
 
 type SessionSlotProps = { sessionId?: unknown }
@@ -105,8 +105,8 @@ function SessionIdTracker({ sessionId: rawSessionId }: SessionSlotProps): any {
   return null
 }
 
-const PANEL_ID = 'dsh-subagent-router-panel'
-const CSS_ID = 'dsh-subagent-router-css'
+const PANEL_ID = 'dsh-subagent-routing-console-panel'
+const CSS_ID = 'dsh-subagent-routing-console-css'
 const COMMON_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 const CSS = `

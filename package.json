@@ -1,5 +1,5 @@
-{
-  "name": "@dsh-external/dsh-subagent-router",
+﻿{
+  "name": "@dsh-external/dsh-subagent-routing-console",
   "version": "0.0.2",
   "description": "Subagent routing console: sidebar panel to pick subagent model & reasoning effort with presets, per-channel rules, live child monitor, and a conversational subagent_route tool",
   "type": "module",
@@ -12,11 +12,11 @@
   "author": "heyuhang",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/heyuhang908/dsh-subagent-router.git"
+    "url": "git+https://github.com/heyuhang908/dsh-subagent-routing-console.git"
   },
-  "homepage": "https://github.com/heyuhang908/dsh-subagent-router#readme",
+  "homepage": "https://github.com/heyuhang908/dsh-subagent-routing-console#readme",
   "bugs": {
-    "url": "https://github.com/heyuhang908/dsh-subagent-router/issues"
+    "url": "https://github.com/heyuhang908/dsh-subagent-routing-console/issues"
   },
   "keywords": [
     "dsh",

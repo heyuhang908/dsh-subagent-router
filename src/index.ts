@@ -1,5 +1,5 @@
-/**
- * @dsh-external/dsh-subagent-router — host half.
+﻿/**
+ * @dsh-external/dsh-subagent-routing-console — host half.
  *
  * 子代理路由台：为所有委派通道（subagent 工具 / fork / workflow worker / ralph 等
  * 一切经过本进程 LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
@@ -177,11 +177,11 @@ const MAX_TRACKED_CHILDREN = 200
 
 const SECTION_ORDER = 216
 const ROUTER_GUIDANCE =
-  '本机已安装子代理路由台插件（dsh-subagent-router）：子代理模型与思考强度由路由台统一托管。左侧栏修改配置后必须点击「保存路由」；保存成功后写入策略文件并立即影响后续委派，无需重启。全局默认必须包含完整 provider + model；会话/通道覆盖只能在路由台全局默认之上继承。host 经 /subagent-router/* 路由提供策略读写与活动子代理监视。对话内可用 subagent_route 工具查询或修改路由策略：action=show 查看 / action=set 设置（scope=session 默认仅当前会话，scope=global 全局；provider+model 成对、effort 可选）/ action=preset 应用预设 / action=inherit 仅清除本会话覆盖；路由台不可关闭。用户提到「子代理模型 / 子代理思考强度 / 路由台」时即指本插件，请据此协作。'
+  '本机已安装子代理路由台插件（dsh-subagent-routing-console）：子代理模型与思考强度由路由台统一托管。左侧栏修改配置后必须点击「保存路由」；保存成功后写入策略文件并立即影响后续委派，无需重启。全局默认必须包含完整 provider + model；会话/通道覆盖只能在路由台全局默认之上继承。host 经 /subagent-router/* 路由提供策略读写与活动子代理监视。对话内可用 subagent_route 工具查询或修改路由策略：action=show 查看 / action=set 设置（scope=session 默认仅当前会话，scope=global 全局；provider+model 成对、effort 可选）/ action=preset 应用预设 / action=inherit 仅清除本会话覆盖；路由台不可关闭。用户提到「子代理模型 / 子代理思考强度 / 路由台」时即指本插件，请据此协作。'
 
 // ──────────────────────────────── 插件本体 ────────────────────────────────
 
-export const name = '@dsh-external/dsh-subagent-router'
+export const name = '@dsh-external/dsh-subagent-routing-console'
 export const inject = ['llm', 'webServer', 'tools', 'systemPrompt', 'sessions']
 
 export interface Config {
@@ -193,7 +193,7 @@ export const Config = z.object({
 })
 
 export function apply(ctx: AppContext, config: Config): void {
-  const SHORT = 'dsh-subagent-router'
+  const SHORT = 'dsh-subagent-routing-console'
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const policyFile = join(dshHome, SHORT, 'policy.json')
 

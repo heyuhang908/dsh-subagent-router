@@ -1,4 +1,4 @@
-# @dsh-external/dsh-subagent-router
+﻿# @dsh-external/dsh-subagent-routing-console
 
 子代理路由台：为所有委派通道（subagent/fork/workflow worker/ralph 等一切经本进程
 LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
@@ -24,8 +24,8 @@ LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
 方式一：GitHub Release 下载 tgz（免构建）
 
 ```bash
-# 从 Releases 下载 dsh-external-dsh-subagent-router-<version>.tgz 并解压到任意目录
-tar -xzf dsh-external-dsh-subagent-router-0.0.1.tgz
+# 从 Releases 下载 dsh-external-dsh-subagent-routing-console-<version>.tgz 并解压到任意目录
+tar -xzf dsh-external-dsh-subagent-routing-console-0.0.1.tgz
 # 注入器环境：运行时注入（免重启）
 dev_inject_plugin <解压出的包目录>
 ```
@@ -33,8 +33,8 @@ dev_inject_plugin <解压出的包目录>
 方式二：clone 构建
 
 ```bash
-git clone https://github.com/heyuhang908/dsh-subagent-router.git
-cd dsh-subagent-router
+git clone https://github.com/heyuhang908/dsh-subagent-routing-console.git
+cd dsh-subagent-routing-console
 npm install
 bash scripts/build.sh
 # 注入器环境：dev_inject_plugin <本目录>；正式装配：dev_install_package <本目录>（重启后由 profile bundles 接管）
