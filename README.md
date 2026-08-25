@@ -3,7 +3,8 @@
 子代理路由台：为所有委派通道（subagent/fork/workflow worker/ralph 等一切经本进程
 LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
 
-- **默认关闭**：不自动更换子代理模型（`policy.enabled` 默认 false；显式开启才路由）
+- **始终托管**：路由台强制接管所有委派子请求（`enabled` 恒为 true，不可关闭）；
+  未配置任何覆盖时按部署基线路由（`MANAGED_DEFAULT_ROUTE`）放行
 - **全局默认**：会话开始前在侧栏设置，影响所有未来委派
 - **会话级覆盖**：`sessionOverrides`（key = 发起委派的顶层会话 id）仅对该会话派生
   的子代理生效；会话内可经面板/`subagent_route` 单独修改
@@ -12,7 +13,7 @@ LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
 - 会话覆盖（含当前会话）统一在侧栏面板「本会话」Tab 管理；旧版输入栏固定悬浮窗已移除，
   客户端仅保留一个空渲染 tracker（conversation.input.dock slot）向面板广播当前会话 ID。
 - host 数据面：`/subagent-router/state`（GET）/ `/subagent-router/policy`（PUT）
-- 对话内工具：`subagent_route`（show / set / preset / disable / inherit，scope=session 默认）
+- 对话内工具：`subagent_route`（show / set / preset / inherit，scope=session 默认）
 - 生效机制：`dsh-agent` 的 `agent/request` 瀑布替换（子代理 step 构建时改
   provider/model/reasoningEffort，request/header 留痕），think 强度经 `resolveModelInfo`
   校验，不被目标模型支持时按设计忽略并记录（不阻断委派）。子代理归属解析：
