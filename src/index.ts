@@ -89,6 +89,17 @@ const DEFAULT_PRESETS: Policy['presets'] = {
   effort_max: { label: '🧠 拉满', override: { effort: 'max' } },
 }
 
+/**
+ * 角色预设：模型 + 思考强度的组合档案（借鉴角色路由类插件）。
+ * provider/model 留空 = 只覆盖强度，模型跟随父级/全局默认；填了即为完整路由覆盖。
+ * 首次使用时用户可在面板或 policy.json 中把角色绑定到具体模型。
+ */
+const ROLE_PRESET_HINTS: Array<{ key: string; label: string; override: OverrideSpec; hint: string }> = [
+  { key: 'role_scout', label: '🔍 侦察', override: { effort: 'low' }, hint: '探索/检索类子代理：低强度省钱' },
+  { key: 'role_reviewer', label: '🧐 评审', override: { effort: 'high' }, hint: '评审/审查类子代理：高强度把关' },
+  { key: 'role_architect', label: '🏗️ 架构', override: { effort: 'max' }, hint: '架构/规划类子代理：拉满思考' },
+]
+
 function defaultPolicy(): Policy {
   return {
     version: 1,
@@ -97,7 +108,10 @@ function defaultPolicy(): Policy {
     defaultOverride: {},
     sessionOverrides: {},
     rules: [],
-    presets: DEFAULT_PRESETS,
+    presets: {
+      ...DEFAULT_PRESETS,
+      ...Object.fromEntries(ROLE_PRESET_HINTS.map((r) => [r.key, { label: r.label, override: r.override }])),
+    },
   }
 }
 
@@ -679,14 +693,14 @@ export function apply(ctx: AppContext, config: Config): void {
   const routeTool = defineTool({
     name: 'subagent_route',
     description:
-      '查看或修改子代理路由策略（所有委派子代理的模型与思考强度均由此统一管理）。action=show 查看；action=set 设置 provider+model（全局必须完整，session 可只改 effort）；action=preset 应用强度预设；action=inherit 清除当前会话覆盖。路由台始终托管，不能关闭。',
+      '查看或修改子代理路由策略（所有委派子代理的模型与思考强度均由此统一管理）。action=show 查看；action=set 设置 provider+model（全局必须完整，session 可只改 effort）；action=preset 应用强度/角色预设（preset 留空=列出全部可用预设）；action=inherit 清除当前会话覆盖。路由台始终托管，不能关闭。',
     parameters: {
       action: { type: 'string', enum: ['show', 'set', 'preset', 'inherit'], required: true, description: '操作类型：show 查看 / set 设置覆盖 / preset 应用强度预设 / inherit 清除本会话覆盖' },
       scope: { type: 'string', enum: ['global', 'session'], description: 'set/preset/inherit 的作用域（默认 session=仅当前会话，global=全局）' },
       provider: { type: 'string', description: '目标 provider 路由名（set 时与 model 成对）' },
       model: { type: 'string', description: '目标模型 id（set 时与 provider 成对）' },
       effort: { type: 'string', description: '思考强度 id（如 low/medium/high/xhigh/max，空串=模型默认）' },
-      preset: { type: 'string', description: '预设名（preset 时必填）' },
+      preset: { type: 'string', description: '预设名（preset 时可选；留空=列出全部可用预设及角色提示）' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -746,7 +760,17 @@ export function apply(ctx: AppContext, config: Config): void {
         }
       }
       if (a.action === 'preset') {
-        const preset = policy.presets[a.preset ?? '']
+        // 列出预设：action=preset 且未指定 preset 名时返回可用清单（含角色提示）。
+        if (typeof a.preset !== 'string' || !a.preset.trim()) {
+          return {
+            ok: true,
+            scope,
+            presets: Object.fromEntries(Object.entries(policy.presets).map(([k, v]) => [k, { label: v.label, override: ovJson(v.override) }])),
+            roleHints: Object.fromEntries(ROLE_PRESET_HINTS.map((r) => [r.key, r.hint])),
+            hint: '用 action=preset + preset=<名称> 应用；角色预设可先在面板/policy.json 绑定具体模型。',
+          }
+        }
+        const preset = policy.presets[a.preset]
         if (!preset) {
           return { ok: false, error: '未知预设: ' + String(a.preset), available: Object.keys(policy.presets) }
         }
@@ -777,6 +801,67 @@ export function apply(ctx: AppContext, config: Config): void {
   })
   const disposeTool = ctx.tools.register(routeTool)
 
+  // ── 汇聚工具：等待后台子代理结算（借鉴 wait-for-subagents 模式） ──
+  const waitTool = defineTool({
+    name: 'subagent_wait',
+    description:
+      '等待委派出去的子代理结算并回收结果。适合「派发多个后台子代理 → 汇聚全部结果再汇总」的模式。可等待全部活动子代理或指定会话 id（支持逗号分隔多个），带超时保护；超时时返回已完成与仍在运行的部分。',
+    parameters: {
+      sessionIds: { type: 'string', description: '可选：要等待的子代理会话 id，逗号分隔多个；留空=等待当前所有活动子代理' },
+      timeoutMs: { type: 'number', description: '最长等待毫秒数（默认 120000，上限 600000）' },
+      pollMs: { type: 'number', description: '轮询间隔毫秒数（默认 500，下限 100）' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args) {
+      const a = args as { sessionIds?: unknown; timeoutMs?: unknown; pollMs?: unknown }
+      const timeoutMs = Math.min(600_000, Math.max(1_000, typeof a.timeoutMs === 'number' && Number.isFinite(a.timeoutMs) ? a.timeoutMs : 120_000))
+      const pollMs = Math.max(100, typeof a.pollMs === 'number' && Number.isFinite(a.pollMs) ? a.pollMs : 500)
+      const wanted = typeof a.sessionIds === 'string' && a.sessionIds.trim()
+        ? a.sessionIds.split(',').map((s) => s.trim()).filter(Boolean)
+        : []
+      const deadline = Date.now() + timeoutMs
+      // 结算判定：目标集合非空且全部 endedAt；目标为空则等当前所有活动子代理清零。
+      const pending = (): string[] => {
+        const list = [...children.values()]
+        const targets = wanted.length ? list.filter((c) => wanted.includes(c.runId) || (c.rootSessionId && wanted.includes(c.rootSessionId))) : list.filter((c) => !c.endedAt)
+        return targets.filter((c) => !c.endedAt).map((c) => c.runId)
+      }
+      while (Date.now() < deadline) {
+        const rest = pending()
+        if (!rest.length) break
+        await new Promise((resolve) => setTimeout(resolve, pollMs))
+      }
+      const rest = pending()
+      const list = [...children.values()]
+      const targets = wanted.length ? list.filter((c) => wanted.includes(c.runId) || (c.rootSessionId && wanted.includes(c.rootSessionId))) : list
+      const settled = targets
+        .filter((c) => c.endedAt)
+        .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))
+        .slice(0, 20)
+        .map((c) => ({
+          runId: c.runId,
+          channel: c.channel,
+          rootSessionId: c.rootSessionId ?? '',
+          route: c.lastRoute
+            ? { provider: c.lastRoute.provider, model: c.lastRoute.model, effort: c.lastRoute.effort ?? '', rewritten: c.lastRoute.rewritten }
+            : { provider: '', model: '', effort: '', rewritten: false },
+          stopReason: c.stopReason ?? '',
+          durationMs: c.endedAt ? c.endedAt - c.startedAt : 0,
+        }))
+      return {
+        ok: rest.length === 0,
+        timedOut: rest.length > 0,
+        waitedMs: Math.min(timeoutMs, Date.now() - (deadline - timeoutMs)),
+        stillRunning: rest,
+        settled,
+      }
+    },
+  })
+  const disposeWaitTool = ctx.tools.register(waitTool)
+
   // ── 提示词通告 ──
   let disposeSection: (() => void) | undefined
   const syncSection = (): void => {
@@ -791,6 +876,7 @@ export function apply(ctx: AppContext, config: Config): void {
   ctx.effect(() => () => {
     disposeSection?.()
     disposeTool()
+    disposeWaitTool()
     for (const d of disposeRoutes) d()
     for (const d of disposeEvents) d?.()
   })

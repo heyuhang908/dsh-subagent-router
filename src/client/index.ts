@@ -673,6 +673,10 @@ function createPanel(_ctx: ClientContext) {
       const routeText = c.lastRoute
         ? c.lastRoute.provider + '/' + c.lastRoute.model + (c.lastRoute.effort ? ' · ' + c.lastRoute.effort : '')
         : undefined
+      // 意图 vs 实际：note 存在说明有覆盖字段被目标模型拒绝/忽略（如 effort 降档），高亮提示。
+      const intentBadge = c.note && c.lastRoute?.rewritten
+        ? el('span', { class: 'sr-note', title: c.note }, '⚠ 部分覆盖')
+        : undefined
       const row = el(
         'div',
         { class: 'sr-child' },
@@ -682,8 +686,9 @@ function createPanel(_ctx: ClientContext) {
         el('span', { class: 'sr-child-session', title: c.sessionId }, c.sessionId.slice(0, 8)),
       )
       if (routeText) row.append(el('span', { class: 'sr-child-route' }, routeText))
+      if (intentBadge) row.append(intentBadge)
       row.append(el('span', { class: 'sr-child-duration' }, (c.endedAt ? '✓ ' : '') + fmtDuration(c.startedAt, c.endedAt)))
-      if (c.note) row.append(el('span', { class: 'sr-note' }, c.note))
+      if (c.note && !intentBadge) row.append(el('span', { class: 'sr-note' }, c.note))
       return row
     })
   }
@@ -887,7 +892,7 @@ function createPanel(_ctx: ClientContext) {
       chip.addEventListener('click', () => applyPresetTo('global', preset.override))
       chips.append(chip)
     }
-    const chipHint = el('div', { class: 'sr-hint' }, '预设先进入草稿；点击「保存路由」后写盘并立即生效。')
+    const chipHint = el('div', { class: 'sr-hint' }, '预设先进入草稿；点击「保存路由」后写盘并立即生效。角色预设（🔍侦察/🧐评审/🏗️架构）默认只覆盖强度，可在 policy.json 中为其绑定具体模型。')
     const def = policy.defaultOverride
     const defRow = el(
       'div',
