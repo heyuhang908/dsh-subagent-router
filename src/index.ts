@@ -127,6 +127,12 @@ function sanitizeOverride(raw: unknown): OverrideSpec {
   return out
 }
 
+/** 危险键黑名单：防手写 policy.json 注入 __proto__/constructor/prototype 造成原型污染。 */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+function isSafeKey(key: string): boolean {
+  return key.length <= 200 && !DANGEROUS_KEYS.has(key)
+}
+
 function sanitizePolicy(raw: unknown): Policy {
   const base = defaultPolicy()
   if (!raw || typeof raw !== 'object') return base
@@ -148,7 +154,7 @@ function sanitizePolicy(raw: unknown): Policy {
   }
   if (r.sessionOverrides && typeof r.sessionOverrides === 'object') {
     for (const [sessionId, ov] of Object.entries(r.sessionOverrides as Record<string, unknown>)) {
-      if (!sessionId.trim()) continue
+      if (!sessionId.trim() || !isSafeKey(sessionId.trim())) continue
       const cleaned = sanitizeOverride(ov)
       if (!isEmptyOverride(cleaned)) policy.sessionOverrides[sessionId.trim()] = cleaned
     }
@@ -173,7 +179,7 @@ function mergePresets(defaults: Policy['presets'], raw: unknown): Policy['preset
   const out: Policy['presets'] = { ...defaults }
   if (!raw || typeof raw !== 'object') return out
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!key.trim() || !value || typeof value !== 'object') continue
+    if (!key.trim() || !isSafeKey(key.trim()) || !value || typeof value !== 'object') continue
     const v = value as Record<string, unknown>
     if (typeof v.label !== 'string' || !v.label.trim()) continue
     const override = sanitizeOverride(v.override)
@@ -474,9 +480,14 @@ export function apply(ctx: AppContext, config: Config): void {
           const allowed = await effortsFor(config.provider, config.model)
           if (!allowed || allowed.includes(ov.effort)) {
             rewrites += 1
+            if (child) {
+              child.lastRoute = { provider: String(config.provider ?? ''), model: String(config.model ?? ''), effort: ov.effort, rewritten: true, at: Date.now() }
+            }
             return { ...config, reasoningEffort: ReasoningEffortId(ov.effort) }
           }
-          ctx.logger?.warn?.('[' + SHORT + '] effort "' + ov.effort + '" 不被 ' + String(config.provider) + '/' + String(config.model) + ' 支持，已忽略')
+          const note = 'effort "' + ov.effort + '" 不被 ' + String(config.provider) + '/' + String(config.model) + ' 支持，已忽略'
+          if (child) child.note = note
+          ctx.logger?.warn?.('[' + SHORT + '] ' + note)
         } catch (e) {
           ctx.logger?.warn?.('[' + SHORT + '] effort-only route failed; passing parent config: ' + String(e))
         }
@@ -839,11 +850,28 @@ export function apply(ctx: AppContext, config: Config): void {
         ? a.sessionIds.split(',').map((s) => s.trim()).filter(Boolean)
         : []
       const deadline = Date.now() + timeoutMs
+      // 目标匹配：Map 主键（=子代理会话 id，即委派工具返回的 id）、runId、rootSessionId 三者任一命中。
+      const findTargets = (): Array<[string, ChildRecord]> => {
+        const all = [...children.entries()]
+        if (!wanted.length) return all
+        const hit = all.filter(([key, c]) => wanted.includes(key) || wanted.includes(c.runId) || (c.rootSessionId && wanted.includes(c.rootSessionId)))
+        return hit
+      }
       // 结算判定：目标集合非空且全部 endedAt；目标为空则等当前所有活动子代理清零。
       const pending = (): string[] => {
-        const list = [...children.values()]
-        const targets = wanted.length ? list.filter((c) => wanted.includes(c.runId) || (c.rootSessionId && wanted.includes(c.rootSessionId))) : list.filter((c) => !c.endedAt)
-        return targets.filter((c) => !c.endedAt).map((c) => c.runId)
+        const targets = findTargets()
+        return targets.filter(([, c]) => !c.endedAt).map(([key]) => key)
+      }
+      // 指定了 id 但一个都匹配不到：直接报错而不是假成功空等。
+      if (wanted.length && findTargets().length === 0) {
+        return {
+          ok: false,
+          timedOut: false,
+          waitedMs: 0,
+          error: '指定的 sessionIds 没有匹配到任何子代理（可用 subagent_wait 不带参数查看近期结算，或检查 id 是否正确）。',
+          stillRunning: [],
+          settled: [],
+        }
       }
       while (Date.now() < deadline) {
         const rest = pending()
@@ -851,13 +879,13 @@ export function apply(ctx: AppContext, config: Config): void {
         await new Promise((resolve) => setTimeout(resolve, pollMs))
       }
       const rest = pending()
-      const list = [...children.values()]
-      const targets = wanted.length ? list.filter((c) => wanted.includes(c.runId) || (c.rootSessionId && wanted.includes(c.rootSessionId))) : list
+      const targets = findTargets()
       const settled = targets
-        .filter((c) => c.endedAt)
-        .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))
+        .filter(([, c]) => c.endedAt)
+        .sort((x, y) => (y[1].endedAt ?? 0) - (x[1].endedAt ?? 0))
         .slice(0, 20)
-        .map((c) => ({
+        .map(([key, c]) => ({
+          sessionId: key,
           runId: c.runId,
           channel: c.channel,
           rootSessionId: c.rootSessionId ?? '',
@@ -873,6 +901,7 @@ export function apply(ctx: AppContext, config: Config): void {
         waitedMs: Math.min(timeoutMs, Date.now() - (deadline - timeoutMs)),
         stillRunning: rest,
         settled,
+        error: rest.length > 0 ? '等待超时：仍有子代理未结算。' : '',
       }
     },
   })
