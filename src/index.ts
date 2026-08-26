@@ -143,7 +143,8 @@ function sanitizePolicy(raw: unknown): Policy {
     defaultOverride,
     sessionOverrides: {},
     rules: [],
-    presets: base.presets,
+    // 预设合并：代码默认打底，用户自定义（policy.json）覆盖/新增——否则自定义角色绑定会被加载时重置。
+    presets: mergePresets(base.presets, r.presets),
   }
   if (r.sessionOverrides && typeof r.sessionOverrides === 'object') {
     for (const [sessionId, ov] of Object.entries(r.sessionOverrides as Record<string, unknown>)) {
@@ -165,6 +166,21 @@ function sanitizePolicy(raw: unknown): Policy {
 
 function isEmptyOverride(o: OverrideSpec): boolean {
   return !o.provider && !o.model && !o.effort
+}
+
+/** 预设合并：默认打底，用户定义覆盖同名/追加新键；条目结构不合法时跳过该条。 */
+function mergePresets(defaults: Policy['presets'], raw: unknown): Policy['presets'] {
+  const out: Policy['presets'] = { ...defaults }
+  if (!raw || typeof raw !== 'object') return out
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key.trim() || !value || typeof value !== 'object') continue
+    const v = value as Record<string, unknown>
+    if (typeof v.label !== 'string' || !v.label.trim()) continue
+    const override = sanitizeOverride(v.override)
+    if (isEmptyOverride(override)) continue
+    out[key.trim()] = { label: v.label.trim(), override }
+  }
+  return out
 }
 
 // ──────────────────────────────── 活动子代理追踪 ────────────────────────────────
