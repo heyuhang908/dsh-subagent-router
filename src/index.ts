@@ -212,8 +212,6 @@ const MAX_TRACKED_CHILDREN = 200
 // ──────────────────────────────── 提示词通告 ────────────────────────────────
 
 const SECTION_ORDER = 216
-const ROUTER_GUIDANCE =
-  '本机已安装子代理路由台插件（dsh-subagent-routing-console）：子代理模型与思考强度由路由台统一托管。左侧栏修改配置后必须点击「保存路由」；保存成功后写入策略文件并立即影响后续委派，无需重启。全局默认必须包含完整 provider + model；会话/通道覆盖只能在路由台全局默认之上继承。host 经 /subagent-routing-console/* 路由提供策略读写与活动子代理监视。对话内可用 subagent_route 工具查询或修改路由策略：action=show 查看 / action=set 设置（scope=session 默认仅当前会话，scope=global 全局；provider+model 成对、effort 可选）/ action=preset 应用预设 / action=inherit 仅清除本会话覆盖；路由台不可关闭。用户提到「子代理模型 / 子代理思考强度 / 路由台」时即指本插件，请据此协作。'
 
 // ──────────────────────────────── 插件本体 ────────────────────────────────
 
@@ -720,7 +718,7 @@ export function apply(ctx: AppContext, config: Config): void {
   const routeTool = defineTool({
     name: 'subagent_route',
     description:
-      '查看或修改子代理路由策略（所有委派子代理的模型与思考强度均由此统一管理）。action=show 查看；action=set 设置 provider+model（全局必须完整，session 可只改 effort）；action=preset 应用强度/角色预设（preset 留空=列出全部可用预设）；action=inherit 清除当前会话覆盖。路由台始终托管，不能关闭。',
+      '查看或修改子代理路由策略（所有委派子代理的模型与思考强度均由此统一管理）。action=show 查看；action=set 设置 provider+model（全局必须完整，session 可只改 effort）；action=preset 应用强度/角色预设（preset 留空=列出全部可用预设）；action=inherit 清除当前会话覆盖。路由台始终托管，不能关闭。注意：可续接子代理（fork/后台续聊）每次续聊都重新过路由——改路由后其下一轮即用新模型；一次性子代理路由在首请求定型。',
     parameters: {
       action: { type: 'string', enum: ['show', 'set', 'preset', 'inherit'], required: true, description: '操作类型：show 查看 / set 设置覆盖 / preset 应用强度预设 / inherit 清除本会话覆盖' },
       scope: { type: 'string', enum: ['global', 'session'], description: 'set/preset/inherit 的作用域（默认 session=仅当前会话，global=全局）' },
@@ -909,10 +907,38 @@ export function apply(ctx: AppContext, config: Config): void {
 
   // ── 提示词通告 ──
   let disposeSection: (() => void) | undefined
+  /** 从当前 policy 动态构建角色路由表：模型改绑定/加角色后，新会话通告自动跟随。 */
+  const buildGuidance = (): string => {
+    const roleEntries = Object.entries(policy.presets).filter(([key]) => key.startsWith('role_'))
+    const roleLines = roleEntries
+      .map(([key, p]) => {
+        const o = p.override
+        const route = o.provider && o.model ? `${o.provider}/${o.model}` : '跟随父级/全局默认'
+        const hint = ROLE_PRESET_HINTS.find((h) => h.key === key)?.hint ?? ''
+        return `  - preset=${key}（${p.label}）：路由 ${route}${o.effort ? ' · 强度 ' + o.effort : ''}${hint ? '。适用：' + hint : ''}`
+      })
+    const roleBlock = roleLines.length
+      ? '\n角色路由约定（用户已绑定模型；委派前按任务性质主动选择并经 subagent_route 应用，无需询问）：\n' + roleLines.join('\n') + '\n'
+      : ''
+    return [
+      '本机已安装子代理路由台插件（dsh-subagent-routing-console）：子代理模型与思考强度由路由台统一托管。左侧栏修改配置后必须点击「保存路由」；保存成功后写入策略文件并立即影响后续委派，无需重启。全局默认必须包含完整 provider + model；会话/通道覆盖只能在路由台全局默认之上继承。host 经 /subagent-routing-console/* 路由提供策略读写与活动子代理监视。对话内可用 subagent_route 工具查询或修改路由策略：action=show 查看 / action=set 设置（scope=session 默认仅当前会话，scope=global 全局；provider+model 成对、effort 可选）/ action=preset 应用预设（preset 留空=列出全部）/ action=inherit 仅清除本会话覆盖；另有 subagent_wait 工具可等待后台子代理结算并回收结果；路由台不可关闭。用户提到「子代理模型 / 子代理思考强度 / 路由台」时即指本插件，请据此协作。',
+      roleBlock +
+      (roleEntries.length
+        ? '委派前先判断任务性质：探索/检索→侦察，评审/审查→评审，架构/规划→架构；匹配到角色时用 subagent_route(action=preset, preset=<角色>, scope=session) 应用到当前会话再派发，一次会话内同性质任务无需重复应用。'
+        : '') +
+      [
+        '\n子代理形态与路由语义：',
+        '· 一次性子代理（subagent/workflow worker，跑完即止）：路由在其首请求时定型，改策略不影响已在跑的实例。',
+        '· 可续接子代理（subagent_fork/后台子代理经 send_message 续聊）：每次续聊都是新请求、都会重新过路由——',
+        '  改策略后续接子代理下一轮即吃新路由；反之给父会话应用的角色覆盖也会影响其后续轮。需要「换模型续跑」时，',
+        '  先 subagent_route 改路由再 send_message；需要「保持原模型续跑」时不要动路由，或改用一次性子代理。',
+      ].join(''),
+    ].join('')
+  }
   const syncSection = (): void => {
     disposeSection?.()
     disposeSection = undefined
-    disposeSection = ctx.systemPrompt.section({ name: 'plugin:subagent-router', order: SECTION_ORDER, text: ROUTER_GUIDANCE })
+    disposeSection = ctx.systemPrompt.section({ name: 'plugin:subagent-router', order: SECTION_ORDER, text: buildGuidance() })
   }
   syncSection()
 
