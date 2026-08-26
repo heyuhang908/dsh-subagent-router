@@ -67,6 +67,16 @@ export interface ChannelRule {
   override: OverrideSpec
 }
 
+export interface AutoRule {
+  /** 关键词列表（不区分大小写，子串匹配子代理任务文本）。 */
+  keywords: string[]
+  /** 命中后应用的预设名（policy.presets 的键，如 role_scout）。 */
+  preset: string
+  /** 可选：仅对指定通道生效（如 fork/workflow）；留空 = 全通道。 */
+  channels?: string[]
+  enabled: boolean
+}
+
 export interface Policy {
   version: 1
   /**
@@ -81,6 +91,11 @@ export interface Policy {
   /** 按通道规则：'*' 为兜底，精确 channel 覆盖同名字段。 */
   rules: ChannelRule[]
   presets: Record<string, { label: string; override: OverrideSpec }>
+  /**
+   * 关键词自动路由：任务文本命中关键词时应用对应预设的路由。
+   * 优先级最低（在全局默认之后、通道/会话覆盖之前生效），可被上层覆盖。
+   */
+  autoRules?: AutoRule[]
 }
 
 const DEFAULT_PRESETS: Policy['presets'] = {
@@ -100,6 +115,29 @@ const ROLE_PRESET_HINTS: Array<{ key: string; label: string; override: OverrideS
   { key: 'role_architect', label: '🏗️ 架构', override: { effort: 'max' }, hint: '架构/规划类子代理：拉满思考' },
 ]
 
+/**
+ * 关键词自动路由默认规则：任务文本命中即应用对应角色路由（宿主强制，模型无感）。
+ * 匹配子代理首条 user 消息（含 description/prompt），不区分大小写子串匹配。
+ * 用户可在 policy.json 的 autoRules 中增删改；enabled=false 或删空数组即停用。
+ */
+const DEFAULT_AUTO_RULES: AutoRule[] = [
+  {
+    keywords: ['调研', '检索', '查找', '搜索', '调研一下', '探索', '排查', '定位', '找出', '列出', '盘点', 'search', 'find', 'explore', 'investigate', 'locate', 'scan'],
+    preset: 'role_scout',
+    enabled: true,
+  },
+  {
+    keywords: ['审查', '评审', 'review', '审计', '把关', '挑错', '找茬', '验证', '校验', '检查', 'verify', 'audit'],
+    preset: 'role_reviewer',
+    enabled: true,
+  },
+  {
+    keywords: ['架构', '设计', '规划', '方案', '重构计划', '蓝图', '总体', '选型', 'architect', 'design', 'plan', 'blueprint'],
+    preset: 'role_architect',
+    enabled: true,
+  },
+]
+
 function defaultPolicy(): Policy {
   return {
     version: 1,
@@ -112,6 +150,7 @@ function defaultPolicy(): Policy {
       ...DEFAULT_PRESETS,
       ...Object.fromEntries(ROLE_PRESET_HINTS.map((r) => [r.key, { label: r.label, override: r.override }])),
     },
+    autoRules: DEFAULT_AUTO_RULES.map((r) => ({ ...r, keywords: [...r.keywords] })),
   }
 }
 
@@ -166,6 +205,28 @@ function sanitizePolicy(raw: unknown): Policy {
       if (typeof rule.channel !== 'string' || !rule.channel.trim()) continue
       policy.rules.push({ channel: rule.channel.trim(), override: sanitizeOverride(rule.override) })
     }
+  }
+  if (Array.isArray(r.autoRules)) {
+    const autoRules: AutoRule[] = []
+    for (const item of r.autoRules) {
+      if (!item || typeof item !== 'object') continue
+      const raw = item as Record<string, unknown>
+      if (typeof raw.preset !== 'string' || !raw.preset.trim() || !isSafeKey(raw.preset.trim())) continue
+      const keywords = Array.isArray(raw.keywords)
+        ? raw.keywords.filter((k): k is string => typeof k === 'string' && k.trim().length > 0 && k.trim().length <= 100).map((k) => k.trim())
+        : []
+      if (!keywords.length) continue
+      autoRules.push({
+        keywords: keywords.slice(0, 50),
+        preset: raw.preset.trim(),
+        ...(Array.isArray(raw.channels) ? { channels: raw.channels.filter((c): c is string => typeof c === 'string' && c.trim().length > 0).map((c) => c.trim()).slice(0, 20) } : {}),
+        enabled: raw.enabled !== false,
+      })
+    }
+    // 用户显式提供 autoRules（含空数组=明确停用）时以用户为准；缺失（旧版 policy.json）时回落代码默认。
+    policy.autoRules = autoRules
+  } else {
+    policy.autoRules = base.autoRules
   }
   return policy
 }
@@ -357,10 +418,60 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  // ── 覆盖解析：全局 → '*' 兜底 → 精确通道 → 顶层会话，按字段继承 ──
+  // ── 覆盖解析：全局 → 关键词自动规则 → '*' 兜底 → 精确通道 → 顶层会话，按字段继承 ──
   // provider/model 是不可拆分的路由身份；只有同一层给出完整对时才能替换身份。
   // effort 可单独继承，但不会凭空构造提示词身份。
-  function effectiveOverride(channel: string, topAncestor: string | undefined): OverrideSpec {
+
+  /**
+   * 提取子代理的任务文本（用于关键词匹配）：子代理会话日志的首条 user/message。
+   * 数据源优先级：live session.events（权威）→ sessionById 无文本，故仅 live 可用。
+   * 取不到时返回空串（自动规则静默跳过，不影响原路由）。
+   */
+  /** 最近一次 taskTextOf 诊断（保留：state.autoRouteDebug 供面板/排查用，无敏感内容——只含事件类型与长度）。 */
+  let lastTaskTextDebug: Record<string, string> = {}
+  function taskTextOf(sid: string, liveSession: any): string {
+    try {
+      const events = Array.isArray(liveSession?.events) ? liveSession.events : []
+      if (!events.length) {
+        lastTaskTextDebug = { sid: String(sid).slice(0, 8), result: 'events 为空/缺失', hasLive: liveSession ? '1' : '0' }
+        return ''
+      }
+      const types = events.slice(0, 15).map((e: any) => String(e?.type ?? '?'))
+      for (const event of events) {
+        if (event?.type !== 'user/message') continue
+        const blocks = Array.isArray(event?.data?.content) ? event.data.content : []
+        const text = blocks.filter((b: any) => b?.type === 'text').map((b: any) => String(b?.text ?? '')).join('\n')
+        if (text.trim()) {
+          lastTaskTextDebug = { sid: String(sid).slice(0, 8), result: '命中', types: types.join(','), len: String(text.length) }
+          return text.slice(0, 4000)
+        }
+      }
+      lastTaskTextDebug = { sid: String(sid).slice(0, 8), result: '无可用 user/message', types: types.join(',') }
+    } catch (e) {
+      lastTaskTextDebug = { sid: String(sid).slice(0, 8), result: '异常: ' + String(e).slice(0, 120) }
+    }
+    return ''
+  }
+
+  /** 关键词自动路由：返回首个命中规则（enabled 且通道匹配且文本含任一关键词）的预设覆盖及来源标注。 */
+  function autoRuleOverride(taskText: string, channel: string): { override: OverrideSpec; via: string } | undefined {
+    const autoRules = policy.autoRules
+    if (!taskText || !Array.isArray(autoRules) || !autoRules.length) return undefined
+    const text = taskText.toLowerCase()
+    for (const rule of autoRules) {
+      if (!rule?.enabled) continue
+      if (rule.channels?.length && !rule.channels.includes(channel)) continue
+      if (!rule.preset) continue
+      const hitKeyword = rule.keywords.find((k) => text.includes(k.toLowerCase()))
+      if (!hitKeyword) continue
+      const preset = policy.presets[rule.preset]
+      if (!preset || isEmptyOverride(preset.override)) continue
+      return { override: preset.override, via: '自动规则[' + rule.preset + ']命中关键词「' + hitKeyword + '」' }
+    }
+    return undefined
+  }
+
+  function effectiveOverride(channel: string, topAncestor: string | undefined, taskText = ''): OverrideSpec {
     // The managed baseline makes parent agent options irrelevant even if an old
     // policy file or a stale listener asks for an empty override.
 
@@ -375,6 +486,7 @@ export function apply(ctx: AppContext, config: Config): void {
     }
 
     applyLayer(policy.defaultOverride)
+    applyLayer(autoRuleOverride(taskText, channel)?.override)
     const fallback = policy.rules.find((rule) => rule.channel === '*' && !isEmptyOverride(rule.override))
     applyLayer(fallback?.override)
     const exact = channel === '*'
@@ -469,7 +581,10 @@ export function apply(ctx: AppContext, config: Config): void {
     const channel = child?.channel ?? 'spawn'
     const topAncestor = sid ? topAncestorOf(sid, liveSession) : undefined
     if (child && topAncestor) child.rootSessionId = topAncestor
-    const ov = effectiveOverride(channel, topAncestor)
+    const taskText = taskTextOf(sid, liveSession)
+    const autoHit = autoRuleOverride(taskText, channel)
+    const ov = autoHit ? autoHit.override : effectiveOverride(channel, topAncestor, taskText)
+    const viaNote = autoHit?.via
     // 跟随父级：无完整路由覆盖时原样放行（v0.0.2 起，无策略部署不再强制改写）。
     if (!ov?.provider || !ov.model) {
       if (ov?.effort) {
@@ -516,7 +631,7 @@ export function apply(ctx: AppContext, config: Config): void {
           rewritten,
           at: Date.now(),
         }
-        child.note = note
+        child.note = viaNote ?? note
       }
       return patched
     } catch (e) {
@@ -607,6 +722,7 @@ export function apply(ctx: AppContext, config: Config): void {
       children: list.slice(0, 50),
       topSessions,
       stats: { rewrites, trackedActive: list.filter((c) => !c.endedAt).length },
+      autoRouteDebug: lastTaskTextDebug,
     }
   }
 
@@ -932,6 +1048,20 @@ export function apply(ctx: AppContext, config: Config): void {
         '· 可续接子代理（subagent_fork/后台子代理经 send_message 续聊）：每次续聊都是新请求、都会重新过路由——',
         '  改策略后续接子代理下一轮即吃新路由；反之给父会话应用的角色覆盖也会影响其后续轮。需要「换模型续跑」时，',
         '  先 subagent_route 改路由再 send_message；需要「保持原模型续跑」时不要动路由，或改用一次性子代理。',
+      ].join('') +
+      [
+        '\n\n形态选择决策（派发前先回答两个问题：①任务会分几轮交互？②结果需要迭代修正吗？）：',
+        '→ 用一次性子代理，当满足任意一条：',
+        '  · 任务可一句话说清、交付物明确（「列出 X」「总结 Y」「翻译 Z」）；预期 1 轮即完成',
+        '  · 并行扇出的独立子任务（互不依赖、失败可单独重发，无需续命）',
+        '  · 结果是一次性消费（报告/答案/清单），后续由父会话自己消化',
+        '→ 用可续接子代理，当满足任意一条：',
+        '  · 任务需要多轮反馈修正（写代码→跑测试→按报错修，轮次不可预知）',
+        '  · 需要中途插话补充信息/纠偏（steer），或分批交付（先骨架后细节）',
+        '  · 上下文构建昂贵（fork 继承对话）且后续还要在其成果上继续工作',
+        '· 量化经验值：预期交互轮次 1 轮 → 一次性；≥2 轮或轮次未知 → 可续接；',
+        '  任务文本含「迭代/修正/按反馈/继续」等词 → 可续接；纯「查询/生成/转换」→ 一次性。',
+        '· 成本视角：一次性失败即整体重来；可续接失败可原地纠偏但占常驻会话。不确定时选可续接（可随时弃用，反之不可补）。',
       ].join(''),
     ].join('')
   }
