@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-subagent-routing-console",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Subagent routing console: sidebar panel to pick subagent model & reasoning effort with presets, per-channel rules, live child monitor, and a conversational subagent_route tool",
   "type": "module",
   "main": "./lib/index.js",
