@@ -571,10 +571,10 @@ function createPanel(_ctx: ClientContext) {
     return [...all]
   }
 
-  function buildProviderSelect(value: string | undefined, onchange: (v: string) => void, ariaLabel?: string, allowEmpty = true): HTMLSelectElement {
+  function buildProviderSelect(value: string | undefined, onchange: (v: string) => void, ariaLabel?: string, allowEmpty = true, emptyLabel = '(继承路由台全局默认)'): HTMLSelectElement {
     const sel = el('select')
     if (ariaLabel) sel.setAttribute('aria-label', ariaLabel)
-    if (allowEmpty) sel.append(el('option', { value: '' }, '(继承路由台全局默认)'))
+    if (allowEmpty) sel.append(el('option', { value: '' }, emptyLabel))
     for (const p of state?.catalog ?? []) {
       if (!p.models.length) continue
       sel.append(el('option', { value: p.name }, p.name))
@@ -584,10 +584,10 @@ function createPanel(_ctx: ClientContext) {
     return sel
   }
 
-  function buildModelSelect(providerName: string | undefined, value: string | undefined, onchange: (v: string) => void, ariaLabel?: string, allowEmpty = true): HTMLSelectElement {
+  function buildModelSelect(providerName: string | undefined, value: string | undefined, onchange: (v: string) => void, ariaLabel?: string, allowEmpty = true, emptyLabel = '(继承路由台全局模型)'): HTMLSelectElement {
     const sel = el('select')
     if (ariaLabel) sel.setAttribute('aria-label', ariaLabel)
-    if (allowEmpty) sel.append(el('option', { value: '' }, providerName ? '(继承路由台全局模型)' : '(随 provider)'))
+    if (allowEmpty) sel.append(el('option', { value: '' }, emptyLabel))
     for (const m of modelOptionsFor(providerName ?? '')) {
       sel.append(el('option', { value: m.id }, m.name))
     }
@@ -940,7 +940,6 @@ function createPanel(_ctx: ClientContext) {
   function buildRolesPanel(s: State): HTMLElement {
     const policy = s.policy
     const roleEntries = Object.entries(policy.presets).filter(([key]) => key.startsWith('role_'))
-    const wrap = el('div', { class: 'sr-section' })
 
     // ── 本会话角色绑定 ──
     const boundRole = currentSessionId ? policy.sessionRoles?.[currentSessionId] ?? '' : ''
@@ -950,6 +949,7 @@ function createPanel(_ctx: ClientContext) {
       roleSel.append(el('option', { value: key }, preset.label))
     }
     roleSel.value = boundRole
+    if (!currentSessionId) roleSel.disabled = true
     roleSel.addEventListener('change', () => {
       if (!currentSessionId) return
       void commit((p) => {
@@ -982,8 +982,9 @@ function createPanel(_ctx: ClientContext) {
         'div',
         { class: 'sr-row' },
         el('span', { class: 'sr-label' }, preset.label),
-        buildProviderSelect(o.provider, (v) => setPresetField(key, 'provider', v), `${preset.label} provider`),
-        buildModelSelect(o.provider, o.model, (v) => setPresetField(key, 'model', v), `${preset.label} 模型`),
+        // 角色与全局默认彻底独立：空选项语义是「跟随父级」而非「继承全局默认」。
+        buildProviderSelect(o.provider, (v) => setPresetField(key, 'provider', v), `${preset.label} provider`, true, '(跟随父级)'),
+        buildModelSelect(o.provider, o.model, (v) => setPresetField(key, 'model', v), `${preset.label} 模型`, true, '(跟随父级)'),
         buildEffortSelect(o.provider, o.model, o.effort, (v) => setPresetField(key, 'effort', v), `${preset.label} 强度`),
       )
       editors.append(row)

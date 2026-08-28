@@ -243,6 +243,10 @@ function sanitizePolicy(raw: unknown): Policy {
       policy.sessionRoles[sid.trim()] = presetKey.trim()
     }
   }
+  // 悬空清理：指向已删除/改名预设的角色绑定，静默失效不如显式丢弃（须在 presets 合并之后执行）。
+  for (const sid of Object.keys(policy.sessionRoles)) {
+    if (!policy.presets[policy.sessionRoles[sid]]) delete policy.sessionRoles[sid]
+  }
   return policy
 }
 
@@ -308,10 +312,13 @@ export function apply(ctx: AppContext, config: Config): void {
   const policyFile = join(dshHome, SHORT, 'policy.json')
 
   // ── 策略存储：文件持久化，进程内单份 ──
+  // BOM 防御：Windows 记事本/PowerShell 手改极易带上 BOM，JSON.parse 会直接抛错导致策略静默回落默认。
+  const readPolicyFile = (): unknown => JSON.parse(readFileSync(policyFile, 'utf8').replace(/^\uFEFF/, ''))
   let policy: Policy = (() => {
     try {
-      return sanitizePolicy(JSON.parse(readFileSync(policyFile, 'utf8')))
-    } catch {
+      return sanitizePolicy(readPolicyFile())
+    } catch (e) {
+      ctx.logger?.warn?.('[' + SHORT + '] policy.json 加载失败，使用默认策略: ' + String(e))
       return defaultPolicy()
     }
   })()
@@ -351,7 +358,7 @@ export function apply(ctx: AppContext, config: Config): void {
       reloadTimer = setTimeout(() => {
         try {
           if (!existsSync(policyFile)) return
-          const next = sanitizePolicy(JSON.parse(readFileSync(policyFile, 'utf8')))
+          const next = sanitizePolicy(readPolicyFile())
           policy = next
           onPolicyChange()
           ctx.logger?.info?.('[' + SHORT + '] 检测到 policy.json 外部修改，策略已实时重载')
@@ -845,7 +852,9 @@ export function apply(ctx: AppContext, config: Config): void {
             throw new Error('必须保存完整的全局 provider + model 路由。')
           }
           const previous = policy
-          const candidate = sanitizePolicy({ ...policy, ...body, version: 1 as const, presets: policy.presets })
+          // presets 通道：客户端（面板角色绑定编辑器）提交的预设经 mergePresets 消毒后合并——
+          // 此前硬编码 policy.presets 会把面板改动静默丢弃（假成功，评审 P1）。
+          const candidate = sanitizePolicy({ ...policy, ...body, version: 1 as const, presets: body.presets ?? policy.presets })
           policy = candidate
           if (!savePolicy()) {
             policy = previous
