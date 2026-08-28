@@ -320,7 +320,7 @@ function sidebarRoot(): HTMLElement | undefined {
 
 // ──────────────────────────────── 面板控制器 ────────────────────────────────
 
-type TabId = 'session' | 'global' | 'channel' | 'activity'
+type TabId = 'session' | 'global' | 'roles' | 'channel' | 'activity'
 
 function createPanel(_ctx: ClientContext) {
   const root = el('div', { id: PANEL_ID })
@@ -759,6 +759,7 @@ function createPanel(_ctx: ClientContext) {
     const tabDefs: Array<{ id: TabId; label: string }> = [
       { id: 'session', label: '本会话' },
       { id: 'global', label: '全局默认' },
+      { id: 'roles', label: '角色预设' },
       { id: 'channel', label: '通道规则' },
       { id: 'activity', label: '活动监控' },
     ]
@@ -891,13 +892,14 @@ function createPanel(_ctx: ClientContext) {
     const policy = s.policy
     const chips = el('div', { class: 'sr-chips' })
     for (const [key, preset] of Object.entries(policy.presets)) {
-      if (key === 'inherit') continue
+      // 角色预设已独立到「角色预设」Tab；此处只保留纯强度预设。
+      if (key === 'inherit' || key.startsWith('role_')) continue
       const active = isEqualOv(policy.defaultOverride, preset.override)
       const chip = el('button', { class: 'sr-chip', type: 'button', 'aria-pressed': String(active), 'data-preset': key }, preset.label)
       chip.addEventListener('click', () => applyPresetTo('global', preset.override))
       chips.append(chip)
     }
-    const chipHint = el('div', { class: 'sr-hint' }, '预设先进入草稿；点击「保存路由」后写盘并立即生效。角色预设（🔍侦察/🧐评审/🏗️架构）默认只覆盖强度，可在 policy.json 中为其绑定具体模型。')
+    const chipHint = el('div', { class: 'sr-hint' }, '强度预设先进入草稿；点击「保存路由」后写盘并立即生效。角色预设（侦察/评审/架构）已移至独立的「角色预设」Tab，与全局默认相互独立。')
     const def = policy.defaultOverride
     const defRow = el(
       'div',
@@ -915,6 +917,92 @@ function createPanel(_ctx: ClientContext) {
         : '待保存/生效中 → ' + describeOv(def),
     )
     return el('div', { class: 'sr-panel', 'data-panel': 'global' }, el('div', { class: 'sr-title' }, '全局默认'), chips, chipHint, defRow, defHint)
+  }
+
+  const setPresetField = (key: string, field: 'provider' | 'model' | 'effort', value: string): void => {
+    void commit((policy) => {
+      const preset = policy.presets[key]
+      if (!preset) return
+      const next: OverrideSpec = { ...preset.override }
+      if (field === 'provider') {
+        next.provider = value || undefined
+        next.model = undefined
+      } else if (field === 'model') {
+        next.model = value || undefined
+      } else {
+        if (value) next.effort = value
+        else delete next.effort
+      }
+      preset.override = next
+    })
+  }
+
+  function buildRolesPanel(s: State): HTMLElement {
+    const policy = s.policy
+    const roleEntries = Object.entries(policy.presets).filter(([key]) => key.startsWith('role_'))
+    const wrap = el('div', { class: 'sr-section' })
+
+    // ── 本会话角色绑定 ──
+    const boundRole = currentSessionId ? policy.sessionRoles?.[currentSessionId] ?? '' : ''
+    const roleSel = el('select', { 'aria-label': '本会话角色绑定' }) as HTMLSelectElement
+    roleSel.append(el('option', { value: '' }, currentSessionId ? '(未绑定——跟随全局默认/自动规则)' : '(无当前会话)'))
+    for (const [key, preset] of roleEntries) {
+      roleSel.append(el('option', { value: key }, preset.label))
+    }
+    roleSel.value = boundRole
+    roleSel.addEventListener('change', () => {
+      if (!currentSessionId) return
+      void commit((p) => {
+        if (!roleSel.value) delete p.sessionRoles?.[currentSessionId]
+        else {
+          if (!p.sessionRoles) p.sessionRoles = {}
+          p.sessionRoles[currentSessionId] = roleSel.value
+        }
+      })
+    })
+    const bindRow = el(
+      'div',
+      { class: 'sr-row' },
+      el('span', { class: 'sr-label' }, '本会话角色'),
+      roleSel,
+    )
+    const bindHint = el(
+      'div',
+      { class: 'sr-hint' },
+      boundRole
+        ? '本会话已绑定角色：后续子代理整组替换为该角色路由（优先级高于自动规则与全局默认，实时生效）。'
+        : '绑定后本会话所有子代理整组使用该角色路由（独立于全局默认，实时生效，优先级高于自动规则）。',
+    )
+
+    // ── 角色绑定编辑器：每个角色独立的 provider/model/强度 ──
+    const editors = el('div', { class: 'sr-section' })
+    for (const [key, preset] of roleEntries) {
+      const o = preset.override
+      const row = el(
+        'div',
+        { class: 'sr-row' },
+        el('span', { class: 'sr-label' }, preset.label),
+        buildProviderSelect(o.provider, (v) => setPresetField(key, 'provider', v), `${preset.label} provider`),
+        buildModelSelect(o.provider, o.model, (v) => setPresetField(key, 'model', v), `${preset.label} 模型`),
+        buildEffortSelect(o.provider, o.model, o.effort, (v) => setPresetField(key, 'effort', v), `${preset.label} 强度`),
+      )
+      editors.append(row)
+    }
+    const editHint = el(
+      'div',
+      { class: 'sr-hint' },
+      '角色绑定与全局默认相互独立：provider/model 留空 = 模型跟随父级；填了即整组替换（优先级高于关键词自动规则与全局默认）。改动对所有绑定该角色的会话实时生效。',
+    )
+
+    return el(
+      'div',
+      { class: 'sr-panel', 'data-panel': 'roles' },
+      el('div', { class: 'sr-title' }, '角色预设'),
+      bindRow,
+      bindHint,
+      editors,
+      editHint,
+    )
   }
 
   function buildChannelPanel(s: State): HTMLElement {
@@ -966,6 +1054,11 @@ function createPanel(_ctx: ClientContext) {
     globalPanel.id = 'sr-panel-global'
     globalPanel.setAttribute('aria-labelledby', 'sr-tab-global')
     if (selectedTab !== 'global') (globalPanel as HTMLElement).hidden = true
+    const rolesPanel = buildRolesPanel(s)
+    rolesPanel.setAttribute('role', 'tabpanel')
+    rolesPanel.id = 'sr-panel-roles'
+    rolesPanel.setAttribute('aria-labelledby', 'sr-tab-roles')
+    if (selectedTab !== 'roles') (rolesPanel as HTMLElement).hidden = true
     const channelPanel = buildChannelPanel(s)
     channelPanel.setAttribute('role', 'tabpanel')
     channelPanel.id = 'sr-panel-channel'
@@ -976,7 +1069,7 @@ function createPanel(_ctx: ClientContext) {
     activityPanel.id = 'sr-panel-activity'
     activityPanel.setAttribute('aria-labelledby', 'sr-tab-activity')
     if (selectedTab !== 'activity') (activityPanel as HTMLElement).hidden = true
-    panels.append(sessionPanel, globalPanel, channelPanel, activityPanel)
+    panels.append(sessionPanel, globalPanel, rolesPanel, channelPanel, activityPanel)
     const body = el('div', {}, header, offHint, summary, tabs, panels)
     return body
   }
