@@ -128,17 +128,17 @@ const ROLE_PRESET_HINTS: Array<{ key: string; label: string; override: OverrideS
  */
 const DEFAULT_AUTO_RULES: AutoRule[] = [
   {
-    keywords: ['调研', '检索', '查找', '搜索', '调研一下', '探索', '排查', '定位', '找出', '列出', '盘点', 'search', 'find', 'explore', 'investigate', 'locate', 'scan'],
+    keywords: ['调研', '检索', '搜索', '调研一下', '探索', '排查', 'explore', 'investigate', 'locate', 'scan'],
     preset: 'role_scout',
     enabled: true,
   },
   {
-    keywords: ['审查', '评审', 'review', '审计', '把关', '挑错', '找茬', '验证', '校验', '检查', 'verify', 'audit'],
+    keywords: ['审查', '评审', 'review', '审计', '把关', '挑错', '找茬', 'audit'],
     preset: 'role_reviewer',
     enabled: true,
   },
   {
-    keywords: ['架构', '设计', '规划', '方案', '重构计划', '蓝图', '总体', '选型', 'architect', 'design', 'plan', 'blueprint'],
+    keywords: ['架构', '规划', '重构计划', '蓝图', '选型', 'architect', 'blueprint'],
     preset: 'role_architect',
     enabled: true,
   },
@@ -473,7 +473,8 @@ export function apply(ctx: AppContext, config: Config): void {
     if (id) {
       sessionById.delete(id)
       parentLatestText.delete(id)
-      // 会话销毁时同步清理其角色绑定，防止临时子会话的绑定无限残留。
+      // 会话销毁时同步清理其角色绑定。sessionRoles 的键是顶层会话 id，销毁的会话 id 不可复用，
+      // 自动清理可防 policy.json 无限膨胀；副作用是绑定不跨会话持久（重开即新会话 id）。
       if (policy.sessionRoles?.[id]) {
         const next: Policy = { ...policy, sessionRoles: { ...(policy.sessionRoles ?? {}) } }
         delete next.sessionRoles[id]
@@ -803,6 +804,17 @@ export function apply(ctx: AppContext, config: Config): void {
       req.on('error', reject)
     })
 
+  /** 浏览器 drive-by 防护：带 Origin 头的写请求必须同源；无 Origin（curl/同源工具）放行。 */
+  const sameOrigin = (req: any): boolean => {
+    const origin = typeof req?.headers?.origin === 'string' ? req.headers.origin : ''
+    if (!origin) return true
+    try {
+      return new URL(origin).host === String(req?.headers?.host ?? '')
+    } catch {
+      return false
+    }
+  }
+
   async function statePayload() {
     const list = [...children.entries()].map(([sessionId, c]) => ({ sessionId, ...c }))
     list.sort((a, b) => b.startedAt - a.startedAt)
@@ -851,6 +863,10 @@ export function apply(ctx: AppContext, config: Config): void {
           json(res, 405, { ok: false, error: 'method not allowed' })
           return
         }
+        if (!sameOrigin(req)) {
+          json(res, 403, { ok: false, error: 'cross-origin write rejected' })
+          return
+        }
         try {
           const body = JSON.parse((await readBody(req)) || '{}') as Record<string, unknown>
           if (body.enabled === false) throw new Error('子代理路由台始终处于托管模式，不能关闭。')
@@ -891,6 +907,10 @@ export function apply(ctx: AppContext, config: Config): void {
       handler: async (req, res) => {
         if (req.method !== 'PUT' && req.method !== 'POST') {
           json(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        if (!sameOrigin(req)) {
+          json(res, 403, { ok: false, error: 'cross-origin write rejected' })
           return
         }
         try {
