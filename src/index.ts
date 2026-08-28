@@ -24,7 +24,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import z from 'schemastery'
@@ -92,8 +92,14 @@ export interface Policy {
   rules: ChannelRule[]
   presets: Record<string, { label: string; override: OverrideSpec }>
   /**
-   * 关键词自动路由：任务文本命中关键词时应用对应预设的路由。
-   * 优先级最低（在全局默认之后、通道/会话覆盖之前生效），可被上层覆盖。
+   * 会话角色绑定：key = 顶层会话 id，value = 预设键（如 role_architect）。
+   * 引用式绑定（非值拷贝）：命中角色时整组替换为该预设的路由，与全局默认彻底独立——
+   * 绑定缺失的字段回落父级而非全局默认；改预设绑定对所有绑定会话实时生效。
+   */
+  sessionRoles: Record<string, string>
+  /**
+   * 关键词自动路由：任务文本（子代理首条消息或父会话最近用户消息）命中关键词时，
+   * 应用对应预设的路由。宿主强制匹配，模型无感。优先级高于全局默认。
    */
   autoRules?: AutoRule[]
 }
@@ -150,6 +156,7 @@ function defaultPolicy(): Policy {
       ...DEFAULT_PRESETS,
       ...Object.fromEntries(ROLE_PRESET_HINTS.map((r) => [r.key, { label: r.label, override: r.override }])),
     },
+    sessionRoles: {},
     autoRules: DEFAULT_AUTO_RULES.map((r) => ({ ...r, keywords: [...r.keywords] })),
   }
 }
@@ -190,6 +197,7 @@ function sanitizePolicy(raw: unknown): Policy {
     rules: [],
     // 预设合并：代码默认打底，用户自定义（policy.json）覆盖/新增——否则自定义角色绑定会被加载时重置。
     presets: mergePresets(base.presets, r.presets),
+    sessionRoles: {},
   }
   if (r.sessionOverrides && typeof r.sessionOverrides === 'object') {
     for (const [sessionId, ov] of Object.entries(r.sessionOverrides as Record<string, unknown>)) {
@@ -227,6 +235,13 @@ function sanitizePolicy(raw: unknown): Policy {
     policy.autoRules = autoRules
   } else {
     policy.autoRules = base.autoRules
+  }
+  if (r.sessionRoles && typeof r.sessionRoles === 'object') {
+    for (const [sid, presetKey] of Object.entries(r.sessionRoles as Record<string, unknown>)) {
+      if (typeof sid !== 'string' || !sid.trim() || !isSafeKey(sid.trim())) continue
+      if (typeof presetKey !== 'string' || !presetKey.trim() || !isSafeKey(presetKey.trim())) continue
+      policy.sessionRoles[sid.trim()] = presetKey.trim()
+    }
   }
   return policy
 }
@@ -302,15 +317,52 @@ export function apply(ctx: AppContext, config: Config): void {
   })()
   let rewrites = 0
 
+  /** 策略变更后需要刷新的所有派生物（系统提示通告等）在此注册。 */
+  const policyChangeHooks: Array<() => void> = []
+  const onPolicyChange = (): void => {
+    for (const hook of policyChangeHooks) {
+      try {
+        hook()
+      } catch (e) {
+        ctx.logger?.warn?.('[' + SHORT + '] policy-change hook failed: ' + String(e))
+      }
+    }
+  }
+
   const savePolicy = (): boolean => {
     try {
       mkdirSync(dirname(policyFile), { recursive: true })
       writeFileSync(policyFile, JSON.stringify(policy, null, 2), 'utf8')
+      onPolicyChange()
       return true
     } catch (e) {
       ctx.logger?.warn?.('[' + SHORT + '] policy persist failed: ' + String(e))
       return false
     }
+  }
+
+  // ── 实时性：外部手改 policy.json 也立即生效（文件监听 + 防抖重读）──
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined
+  let watcher: ReturnType<typeof watch> | undefined
+  try {
+    watcher = watch(dirname(policyFile), (_event, filename) => {
+      if (filename && filename !== 'policy.json') return
+      if (reloadTimer) clearTimeout(reloadTimer)
+      reloadTimer = setTimeout(() => {
+        try {
+          if (!existsSync(policyFile)) return
+          const next = sanitizePolicy(JSON.parse(readFileSync(policyFile, 'utf8')))
+          policy = next
+          onPolicyChange()
+          ctx.logger?.info?.('[' + SHORT + '] 检测到 policy.json 外部修改，策略已实时重载')
+        } catch (e) {
+          // 手改过程中的半成品文件：保留当前策略，等下一次变更。
+          ctx.logger?.warn?.('[' + SHORT + '] policy.json 重载失败（保留当前策略）: ' + String(e))
+        }
+      }, 300)
+    })
+  } catch (e) {
+    ctx.logger?.warn?.('[' + SHORT + '] policy 文件监听不可用（手改需重载生效）: ' + String(e))
   }
 
   // ── 子代理活动表 ──
@@ -386,20 +438,35 @@ export function apply(ctx: AppContext, config: Config): void {
     })
   }
   for (const session of ctx.sessions.list()) rememberSession(session)
+  // 父会话最近用户消息：显式角色点名（「用架构子代理…」）的关键词匹配数据源（机制强制兜底）。
+  const parentLatestText = new Map<string, string>()
   disposeEvents.push((ctx.on as any)('session/created', (session: any) => rememberSession(session)))
   disposeEvents.push((ctx.on as any)('session/event', (session: any, event: any) => {
+    const sid = typeof session?.id === 'string' ? session.id : ''
+    if (event?.type === 'user/message') {
+      if (!sid) return
+      const blocks = Array.isArray(event?.data?.content) ? event.data.content : []
+      const text = blocks.filter((b: any) => b?.type === 'text').map((b: any) => String(b?.text ?? '')).join('\n').trim()
+      if (!text) return
+      const meta = sessionById.get(sid)
+      // 仅记录顶层会话（非子代理 origin）——那是用户点名的入口。
+      if (!meta || meta.origin !== 'subagent') parentLatestText.set(sid, text.slice(0, 4000))
+      return
+    }
     if (event?.type !== 'session/title') return
-    const id = typeof session?.id === 'string' ? session.id : ''
-    if (!id) return
+    if (!sid) return
     const title = typeof event?.data?.title === 'string' ? event.data.title.trim() : ''
     if (!title) return
-    const existing = sessionById.get(id)
+    const existing = sessionById.get(sid)
     if (existing) existing.displayTitle = title
     else rememberSession(session)
   }))
   disposeEvents.push((ctx.on as any)('session/disposed', (session: any) => {
     const id = typeof session?.id === 'string' ? session.id : ''
-    if (id) sessionById.delete(id)
+    if (id) {
+      sessionById.delete(id)
+      parentLatestText.delete(id)
+    }
   }))
 
   // ── effort 支持表：provider\x00model → 支持的强度 id 列表（[] = 无强度概念）──
@@ -418,13 +485,14 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  // ── 覆盖解析：全局 → 关键词自动规则 → '*' 兜底 → 精确通道 → 顶层会话，按字段继承 ──
+  // ── 覆盖解析（优先级从低到高）：全局默认 → 关键词自动规则 → '*' 兜底 → 精确通道 → 会话角色绑定 → 会话自由覆盖 ──
   // provider/model 是不可拆分的路由身份；只有同一层给出完整对时才能替换身份。
   // effort 可单独继承，但不会凭空构造提示词身份。
+  // ⚠️ 会话角色绑定是「整组替换」语义且与全局默认彻底独立：命中角色时以角色绑定为准，
+  //    绑定未定义的字段回落父级（跟随父级路由），绝不回落全局默认。
 
   /**
    * 提取子代理的任务文本（用于关键词匹配）：子代理会话日志的首条 user/message。
-   * 数据源优先级：live session.events（权威）→ sessionById 无文本，故仅 live 可用。
    * 取不到时返回空串（自动规则静默跳过，不影响原路由）。
    */
   /** 最近一次 taskTextOf 诊断（保留：state.autoRouteDebug 供面板/排查用，无敏感内容——只含事件类型与长度）。 */
@@ -453,28 +521,30 @@ export function apply(ctx: AppContext, config: Config): void {
     return ''
   }
 
-  /** 关键词自动路由：返回首个命中规则（enabled 且通道匹配且文本含任一关键词）的预设覆盖及来源标注。 */
-  function autoRuleOverride(taskText: string, channel: string): { override: OverrideSpec; via: string } | undefined {
+  /** 关键词自动路由：返回首个命中规则（enabled 且通道匹配且文本含任一关键词）的预设覆盖及来源标注。
+   *  匹配文本 = 子代理任务文本 或 父会话最近用户消息（用户显式点名的机制兜底）。 */
+  function autoRuleOverride(taskText: string, parentText: string, channel: string): { override: OverrideSpec; via: string } | undefined {
     const autoRules = policy.autoRules
-    if (!taskText || !Array.isArray(autoRules) || !autoRules.length) return undefined
-    const text = taskText.toLowerCase()
-    for (const rule of autoRules) {
-      if (!rule?.enabled) continue
-      if (rule.channels?.length && !rule.channels.includes(channel)) continue
-      if (!rule.preset) continue
-      const hitKeyword = rule.keywords.find((k) => text.includes(k.toLowerCase()))
-      if (!hitKeyword) continue
-      const preset = policy.presets[rule.preset]
-      if (!preset || isEmptyOverride(preset.override)) continue
-      return { override: preset.override, via: '自动规则[' + rule.preset + ']命中关键词「' + hitKeyword + '」' }
+    if (!Array.isArray(autoRules) || !autoRules.length) return undefined
+    for (const source of [taskText, parentText]) {
+      const text = source.toLowerCase()
+      if (!text) continue
+      for (const rule of autoRules) {
+        if (!rule?.enabled) continue
+        if (rule.channels?.length && !rule.channels.includes(channel)) continue
+        if (!rule.preset) continue
+        const hitKeyword = rule.keywords.find((k) => text.includes(k.toLowerCase()))
+        if (!hitKeyword) continue
+        const preset = policy.presets[rule.preset]
+        if (!preset || isEmptyOverride(preset.override)) continue
+        const viaSource = source === taskText ? '任务文本' : '用户指令'
+        return { override: preset.override, via: '自动规则[' + rule.preset + ']命中' + viaSource + '关键词「' + hitKeyword + '」' }
+      }
     }
     return undefined
   }
 
   function effectiveOverride(channel: string, topAncestor: string | undefined, taskText = ''): OverrideSpec {
-    // The managed baseline makes parent agent options irrelevant even if an old
-    // policy file or a stale listener asks for an empty override.
-
     const merged: OverrideSpec = {}
     const applyLayer = (layer: OverrideSpec | undefined): void => {
       if (!layer) return
@@ -485,14 +555,28 @@ export function apply(ctx: AppContext, config: Config): void {
       if (layer.effort) merged.effort = layer.effort
     }
 
+    // 1) 全局默认（最低优先级）
     applyLayer(policy.defaultOverride)
-    applyLayer(autoRuleOverride(taskText, channel)?.override)
+    // 2) 关键词自动路由：匹配子代理任务文本 + 父会话最近用户消息（用户显式点名的机制兜底）
+    const parentText = topAncestor ? parentLatestText.get(topAncestor) ?? '' : ''
+    applyLayer(autoRuleOverride(taskText, parentText, channel)?.override)
+    // 3) 通道规则：'*' 兜底 → 精确通道
     const fallback = policy.rules.find((rule) => rule.channel === '*' && !isEmptyOverride(rule.override))
     applyLayer(fallback?.override)
     const exact = channel === '*'
       ? undefined
       : policy.rules.find((rule) => rule.channel === channel && !isEmptyOverride(rule.override))
     applyLayer(exact?.override)
+    // 4) 会话角色绑定（引用式，整组替换，与全局默认彻底独立）
+    const roleKey = topAncestor ? policy.sessionRoles?.[topAncestor] : undefined
+    const roleOv = roleKey ? policy.presets[roleKey]?.override : undefined
+    if (roleOv && !isEmptyOverride(roleOv)) {
+      merged.provider = roleOv.provider
+      merged.model = roleOv.model
+      if (roleOv.effort) merged.effort = roleOv.effort
+      else delete merged.effort
+    }
+    // 5) 会话自由覆盖（最高：面板/工具写入的显式值）
     if (topAncestor) applyLayer(policy.sessionOverrides[topAncestor])
 
     // 空覆盖 = 跟随父级：交回空对象，由 agent/request 钩子的守卫原样放行。
@@ -582,9 +666,13 @@ export function apply(ctx: AppContext, config: Config): void {
     const topAncestor = sid ? topAncestorOf(sid, liveSession) : undefined
     if (child && topAncestor) child.rootSessionId = topAncestor
     const taskText = taskTextOf(sid, liveSession)
-    const autoHit = autoRuleOverride(taskText, channel)
-    const ov = autoHit ? autoHit.override : effectiveOverride(channel, topAncestor, taskText)
-    const viaNote = autoHit?.via
+    const parentText = topAncestor ? parentLatestText.get(topAncestor) ?? '' : ''
+    // 五层覆盖一次解析（全局→自动规则→通道→会话角色→会话覆盖）；note 反映「最终生效的最高层来源」。
+    const ov = effectiveOverride(channel, topAncestor, taskText)
+    const autoVia = autoRuleOverride(taskText, parentText, channel)?.via
+    const roleKey = topAncestor ? policy.sessionRoles?.[topAncestor] : undefined
+    // 角色绑定层高于自动规则层：角色存在时其来源优先展示。
+    const viaNote = roleKey ? '会话角色绑定[' + roleKey + ']' + (autoVia ? '（自动规则被角色绑定覆盖）' : '') : autoVia
     // 跟随父级：无完整路由覆盖时原样放行（v0.0.2 起，无策略部署不再强制改写）。
     if (!ov?.provider || !ov.model) {
       if (ov?.effort) {
@@ -878,14 +966,17 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       if (a.action === 'show') {
         const sessionOv = callerSession ? policy.sessionOverrides[callerSession] : undefined
+        const sessionRole = callerSession ? policy.sessionRoles?.[callerSession] : undefined
         return {
           ok: true,
           enabled: policy.enabled,
           scope: callerSession ? 'session' : 'global',
           sessionId: callerSession || '',
+          sessionRole: sessionRole ?? '',
           sessionOverride: sessionOv ? ovJson(sessionOv) : ovJson({}),
           defaultOverride: ovJson(policy.defaultOverride),
           rules: policy.rules.map((r) => ({ channel: r.channel, override: ovJson(r.override) })),
+          autoRules: Array.isArray(policy.autoRules) ? policy.autoRules.map((r) => ({ keywords: r.keywords, preset: r.preset, channels: r.channels ?? [], enabled: r.enabled })) : [],
           activeChildren: [...children.values()].filter((c) => !c.endedAt).length,
           totalRewrites: rewrites,
         }
@@ -894,10 +985,18 @@ export function apply(ctx: AppContext, config: Config): void {
         if (scope === 'global') return { ok: false, error: '不能清除全局路由；请保存一个明确的 provider + model。' }
         if (!targetKey) return { ok: false, error: '当前调用没有可清除的会话覆盖。' }
         writeOverride({})
+        const previous = policy
+        const next: Policy = { ...policy, sessionRoles: { ...(policy.sessionRoles ?? {}) } }
+        delete next.sessionRoles[targetKey]
+        policy = next
+        if (!savePolicy()) {
+          policy = previous
+          return { ok: false, error: '策略写盘失败，角色绑定未清除。' }
+        }
         return {
           ok: true,
           scope,
-          message: '本会话覆盖已清除；该会话的子代理继续使用路由台全局默认。',
+          message: '本会话覆盖与角色绑定已清除；该会话的子代理恢复使用路由台全局默认。',
         }
       }
       if (a.action === 'preset') {
@@ -908,18 +1007,41 @@ export function apply(ctx: AppContext, config: Config): void {
             scope,
             presets: Object.fromEntries(Object.entries(policy.presets).map(([k, v]) => [k, { label: v.label, override: ovJson(v.override) }])),
             roleHints: Object.fromEntries(ROLE_PRESET_HINTS.map((r) => [r.key, r.hint])),
-            hint: '用 action=preset + preset=<名称> 应用；角色预设可先在面板/policy.json 绑定具体模型。',
+            hint: '用 action=preset + preset=<名称> 应用（按会话绑定，实时生效）；角色预设可先在面板/policy.json 绑定具体模型。',
           }
         }
         const preset = policy.presets[a.preset]
         if (!preset) {
           return { ok: false, error: '未知预设: ' + String(a.preset), available: Object.keys(policy.presets) }
         }
-        const current = targetKey ? { ...(policy.sessionOverrides[targetKey] ?? {}) } : { ...policy.defaultOverride }
-        writeOverride({ ...current, ...sanitizeOverride(preset.override) })
-        return targetKey
-          ? { ok: true, enabled: true, scope, applied: preset.label, defaultOverride: ovJson(policy.defaultOverride), sessionOverride: ovJson(policy.sessionOverrides[targetKey] ?? {}) }
-          : { ok: true, enabled: true, scope, applied: preset.label, defaultOverride: ovJson(policy.defaultOverride) }
+        // 角色应用 = 引用式会话绑定（sessionRoles），与全局默认彻底独立：
+        // 命中时整组替换为预设路由；改预设绑定对所有绑定会话实时生效。
+        if (!targetKey) {
+          return {
+            ok: false,
+            error: '角色预设按会话绑定（scope=session）；全局默认请改用 action=set 设置 provider + model。',
+          }
+        }
+        const previous = policy
+        const next: Policy = { ...policy, sessionRoles: { ...(policy.sessionRoles ?? {}) } }
+        next.sessionRoles[targetKey] = a.preset
+        policy = next
+        if (!savePolicy()) {
+          policy = previous
+          return { ok: false, error: '策略写盘失败，角色绑定未生效。' }
+        }
+        if (preset.override.provider && preset.override.model && preset.override.effort) {
+          await effortsFor(preset.override.provider, preset.override.model)
+        }
+        return {
+          ok: true,
+          enabled: true,
+          scope: 'session',
+          applied: preset.label,
+          sessionRole: a.preset,
+          sessionRoleRoute: ovJson(preset.override),
+          message: '该会话后续子代理将使用「' + preset.label + '」的绑定路由（独立于全局默认，实时生效）。',
+        }
       }
       // action === 'set'
       const hasPair = Boolean(a.provider && a.model)
@@ -1040,7 +1162,7 @@ export function apply(ctx: AppContext, config: Config): void {
       '本机已安装子代理路由台插件（dsh-subagent-routing-console）：子代理模型与思考强度由路由台统一托管。左侧栏修改配置后必须点击「保存路由」；保存成功后写入策略文件并立即影响后续委派，无需重启。全局默认必须包含完整 provider + model；会话/通道覆盖只能在路由台全局默认之上继承。host 经 /subagent-routing-console/* 路由提供策略读写与活动子代理监视。对话内可用 subagent_route 工具查询或修改路由策略：action=show 查看 / action=set 设置（scope=session 默认仅当前会话，scope=global 全局；provider+model 成对、effort 可选）/ action=preset 应用预设（preset 留空=列出全部）/ action=inherit 仅清除本会话覆盖；另有 subagent_wait 工具可等待后台子代理结算并回收结果；路由台不可关闭。用户提到「子代理模型 / 子代理思考强度 / 路由台」时即指本插件，请据此协作。',
       roleBlock +
       (roleEntries.length
-        ? '委派前先判断任务性质：探索/检索→侦察，评审/审查→评审，架构/规划→架构；匹配到角色时用 subagent_route(action=preset, preset=<角色>, scope=session) 应用到当前会话再派发，一次会话内同性质任务无需重复应用。'
+        ? '委派前先判断任务性质：探索/检索→侦察，评审/审查→评审，架构/规划→架构；匹配到角色时用 subagent_route(action=preset, preset=<角色>, scope=session) 应用到当前会话再派发，一次会话内同性质任务无需重复应用。角色绑定与全局默认相互独立：命中角色即整组替换其绑定路由，不回落全局默认。用户点名某角色或任务命中关键词自动规则时，宿主会强制应用角色路由（即便未调用 subagent_route）。所有策略改动对所有子代理的下一轮请求实时生效。'
         : '') +
       [
         '\n子代理形态与路由语义：',
@@ -1071,6 +1193,8 @@ export function apply(ctx: AppContext, config: Config): void {
     disposeSection = ctx.systemPrompt.section({ name: 'plugin:subagent-router', order: SECTION_ORDER, text: buildGuidance() })
   }
   syncSection()
+  // 策略每次变更（工具/面板/手改文件实时监听）都刷新系统提示通告，保证角色表等始终与最新策略一致。
+  policyChangeHooks.push(syncSection)
 
   ctx.logger?.info?.('[' + SHORT + '] 路由台就绪（enabled=' + policy.enabled + '，规则 ' + policy.rules.length + ' 条）')
 
@@ -1080,5 +1204,7 @@ export function apply(ctx: AppContext, config: Config): void {
     disposeWaitTool()
     for (const d of disposeRoutes) d()
     for (const d of disposeEvents) d?.()
+    watcher?.close()
+    if (reloadTimer) clearTimeout(reloadTimer)
   })
 }

@@ -58,6 +58,8 @@ interface Policy {
   sessionOverrides: Record<string, OverrideSpec>
   rules: Array<{ channel: string; override: OverrideSpec }>
   presets: Record<string, { label: string; override: OverrideSpec }>
+  sessionRoles?: Record<string, string>
+  autoRules?: Array<{ keywords: string[]; preset: string; channels?: string[]; enabled: boolean }>
 }
 interface CatalogModel {
   id: string
@@ -460,6 +462,9 @@ function createPanel(_ctx: ClientContext) {
       sessionOverrides: Object.fromEntries(Object.entries(base.sessionOverrides).map(([k, v]) => [k, { ...v }])),
       rules: base.rules.map((r) => ({ channel: r.channel, override: { ...r.override } })),
       presets: clonePresets(base.presets),
+      // 引用式角色绑定与自动规则原样保留：面板编辑不触碰它们，但保存时必须随策略一起回传（否则会被抹掉）。
+      sessionRoles: { ...(base.sessionRoles ?? {}) },
+      autoRules: (base.autoRules ?? []).map((r) => ({ ...r, keywords: [...r.keywords] })),
     }
     mutate(policy)
     draftPolicy = policy
