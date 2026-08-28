@@ -142,6 +142,7 @@ const CSS = `
 #${PANEL_ID} .sr-summary-source[data-source="session"] { color:#0969da; border-color: rgba(9,105,218,.3); background: rgba(9,105,218,.08); }
 #${PANEL_ID} .sr-summary-source[data-source="channel"] { color:#8250df; border-color: rgba(130,80,223,.3); background: rgba(130,80,223,.08); }
 #${PANEL_ID} .sr-summary-source[data-source="global"] { color:#1a7f37; border-color: rgba(26,127,55,.3); background: rgba(26,127,55,.08); }
+#${PANEL_ID} .sr-summary-source[data-source="role"] { color:#9a6700; border-color: rgba(154,103,0,.35); background: rgba(154,103,0,.08); }
 #${PANEL_ID} .sr-summary-source[data-source="inherit"] { opacity:.6; }
 #${PANEL_ID} .sr-summary-chain { font-size:10px; opacity:.7; line-height:1.4; word-break:break-all; }
 #${PANEL_ID} .sr-summary-explain { font-size:10.5px; opacity:.68; line-height:1.4; }
@@ -630,18 +631,34 @@ function createPanel(_ctx: ClientContext) {
       }
     }
     applyLayer(policy.defaultOverride, '全局默认', 'global')
+    // 关键词自动规则层不在此计算：命中发生在宿主派发时（按子代理任务文本匹配），面板拿不到
+    // 任务文本、无法预判命中，只在链条文案中注明其位置（全局默认之上、通道规则之下）。
     applyLayer(policy.rules.find((r) => r.channel === '*')?.override, '通道兜底', 'channel')
     applyLayer(policy.rules.find((r) => r.channel === channel)?.override, '通道规则', 'channel')
+    // 会话角色绑定：引用式、整组替换，与宿主 effectiveOverride 第 4 层逐字对齐——
+    // 命中角色即以其预设整体覆盖 provider/model/effort，缺失字段回落父级（置空），绝不回落全局默认。
+    const roleKey = sessionId ? policy.sessionRoles?.[sessionId] : undefined
+    const roleOv = roleKey ? policy.presets[roleKey]?.override : undefined
+    if (roleKey && roleOv && !isEmptyOv(roleOv)) {
+      merged.provider = roleOv.provider
+      merged.model = roleOv.model
+      if (roleOv.effort) merged.effort = roleOv.effort
+      else delete merged.effort
+      sourceLabel = '会话角色绑定[' + roleKey + ']'
+      sourceKey = 'role'
+    }
     applyLayer(sessionId ? policy.sessionOverrides[sessionId] : undefined, '会话覆盖', 'session')
     if (!isEmptyOv(merged)) {
       return {
         sourceLabel,
         sourceKey,
         override: merged,
-        chain: '全局默认 → 通道兜底 → 通道规则 → 会话覆盖（按字段继承）',
-        description: sourceKey === 'session'
-          ? `会话 ${sessionId.slice(0, 8)} 的路由字段生效，其余字段继承通道/全局。`
-          : '当前路由按字段从全局、通道到会话层继承。',
+        chain: '全局默认 → 自动规则* → 通道兜底 → 通道规则 → 会话角色绑定 → 会话覆盖（按字段继承；* 自动规则按子代理任务文本在宿主派发时判定，面板不可预判）',
+        description: sourceKey === 'role'
+          ? `会话 ${sessionId.slice(0, 8)} 已绑定角色：整组替换为其预设路由，缺失字段回落父级。`
+          : sourceKey === 'session'
+            ? `会话 ${sessionId.slice(0, 8)} 的路由字段生效，其余字段继承通道/全局。`
+            : '当前路由按字段从全局、通道到会话层继承。',
         human: describeOv(merged),
       }
     }
