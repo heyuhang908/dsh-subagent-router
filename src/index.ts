@@ -473,6 +473,13 @@ export function apply(ctx: AppContext, config: Config): void {
     if (id) {
       sessionById.delete(id)
       parentLatestText.delete(id)
+      // 会话销毁时同步清理其角色绑定，防止临时子会话的绑定无限残留。
+      if (policy.sessionRoles?.[id]) {
+        const next: Policy = { ...policy, sessionRoles: { ...(policy.sessionRoles ?? {}) } }
+        delete next.sessionRoles[id]
+        policy = next
+        savePolicy()
+      }
     }
   }))
 
@@ -908,9 +915,15 @@ export function apply(ctx: AppContext, config: Config): void {
             defaultOverride: { ...policy.defaultOverride },
             sessionOverrides: Object.fromEntries(Object.entries(policy.sessionOverrides).map(([k, v]) => [k, { ...v }])),
             rules: policy.rules.map((r) => ({ channel: r.channel, override: { ...r.override } })),
+            sessionRoles: { ...(policy.sessionRoles ?? {}) },
           }
-          if (isEmptyOverride(override)) delete next.sessionOverrides[sessionId]
-          else next.sessionOverrides[sessionId] = override
+          if (isEmptyOverride(override)) {
+            delete next.sessionOverrides[sessionId]
+            // inherit 同时解除角色绑定（与 subagent_route inherit 语义一致）。
+            delete next.sessionRoles[sessionId]
+          } else {
+            next.sessionOverrides[sessionId] = override
+          }
           policy = next
           if (!savePolicy()) {
             policy = previous
