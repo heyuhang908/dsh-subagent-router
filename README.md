@@ -18,6 +18,7 @@ LLM 运行时的子会话）提供「模型 + 思考强度」的路由覆盖。
   的子代理生效；会话内可经面板/`subagent_route` 单独修改
 - **角色预设**：🔍侦察/🧐评审/🏗️架构（模型+强度组合档案，面板「角色预设」Tab 可视化绑定）
   + 强度预设 chips；`subagent_route action=preset` 按会话绑定（引用式，实时生效）
+- 会话销毁时自动清理该会话的角色绑定（sessionRoles 键为顶层会话 id，销毁的会话 id 不可复用，防止策略文件无限膨胀；绑定不跨会话持久）
 - **实时性**：`agent/request` 每请求实时解析当前策略——工具/面板改动即时生效；
   policy.json 文件监听（300ms 防抖）让**手改也实时生效**，无需重启或 reload
 - 侧栏常驻面板五个 Tab：本会话 / 全局默认（强度预设 chips）/ **角色预设**（绑定编辑器
@@ -82,3 +83,4 @@ slot**：它是 session-scope 且空白会话（新会话未发消息）时整�
   （本插件首次上线踩过，症状：rewrites 恒 0 + note 显示旧策略状态）。
 - client 骨架扫描器要求 `inject` 含 `slots` + `slots.register({name:'<已知slot>'})`
   紧邻形态；本插件以 sidebar.footer.action 空条目作为扫描器锚点（真实面板走 DOM）。
+- 对外写入端点（/policy、/session）校验 Origin 同源：带 Origin 头的跨站写请求返回 403，防浏览器 drive-by 改路由；无 Origin 头的 curl/工具调用不受影响。
